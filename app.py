@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Générateur Planning EHPAD", page_icon="🏥", layout="wide")
 st.title("🏥 Générateur de Planning Soignants (IA)")
-st.markdown("Version **Sécurité Totale** : Max 3 WE, Rythme 6j/4j et gestion des congés.")
+st.markdown("**Règle Stricte : Jamais deux week-ends consécutifs.** Les manques sont comblés par des remplaçants.")
 
 # --- 2. INTERFACE ---
 col1, col2 = st.columns([1, 3])
@@ -19,8 +19,6 @@ with col1:
 
 with col2:
     st.subheader("👥 Équipe & Absences")
-    st.info("Format absences : '01/05' ou '01/05-05/05'. Max 3 WE travaillés par personne.")
-    
     data_base = pd.DataFrame({
         "Nom": [f"Soignant 100% (n°{i+1})" for i in range(15)] + [f"Soignant 80% (n°{i+1})" for i in range(3)],
         "Contrat (%)": [100]*15 + [80]*3,
@@ -28,12 +26,11 @@ with col2:
     })
     df_equipe = st.data_editor(data_base, num_rows="dynamic", use_container_width=True)
 
-# --- FONCTION DE PARSING DES DATES ---
-def get_absence_indices(text, start_date, nb_days):
+# --- FONCTION DATES ---
+def get_abs(text, start_date, nb_days):
     indices = []
     if not text or pd.isna(text): return indices
-    parts = str(text).replace(' ', '').split(',')
-    for part in parts:
+    for part in str(text).replace(' ', '').split(','):
         try:
             if '-' in part:
                 d1_s, d2_s = part.split('-')
@@ -50,134 +47,118 @@ def get_absence_indices(text, start_date, nb_days):
     return list(set(indices))
 
 # --- 3. MOTEUR IA ---
-if st.button("🚀 GÉNÉRER LE PLANNING (MAX 3 WE)", type="primary", use_container_width=True):
+if st.button("🚀 GÉNÉRER LE PLANNING (ZÉRO FATIGUE)", type="primary", use_container_width=True):
     
-    # Nettoyage
     df_equipe['Contrat (%)'] = pd.to_numeric(df_equipe['Contrat (%)'], errors='coerce')
     df_equipe = df_equipe.dropna(subset=['Nom', 'Contrat (%)'])
-    noms_salaries = df_equipe["Nom"].tolist()
+    noms_reels = df_equipe["Nom"].tolist()
     contrats = df_equipe["Contrat (%)"].tolist()
     abs_raw = df_equipe["Absences / Congés"].tolist()
-    total_salaries = len(noms_salaries)
     
-    if total_salaries == 0:
-        st.error("⚠️ L'équipe est vide.")
-    else:
-        with st.spinner("L'IA verrouille les week-ends et calcule le cycle 6j/4j..."):
-            jours = nb_semaines * 7
-            max_jours_contrat = [int((c / 100) * 5 * nb_semaines) for c in contrats]
-            shifts = ['M', 'A', 'C']
+    # On ajoute 10 "Remplaçants virtuels" pour boucher les trous
+    noms_complets = noms_reels + [f"REMPLAÇANT {i+1}" for i in range(10)]
+    nb_reels = len(noms_reels)
+    total_staff = len(noms_complets)
+    
+    with st.spinner("L'IA protège vos soignants et cherche des remplaçants..."):
+        jours = nb_semaines * 7
+        shifts = ['M', 'A', 'C']
+        model = cp_model.CpModel()
+        x = {}
+        for e in range(total_staff):
+            for d in range(jours):
+                for s in shifts:
+                    x[(e, d, s)] = model.NewBoolVar(f's_{e}_{d}_{s}')
+        
+        # --- RÈGLES POUR LES SOIGNANTS RÉELS ---
+        for e in range(nb_reels):
+            # Contrat
+            max_j = int((contrats[e] / 100) * 5 * nb_semaines)
+            model.Add(sum(x[(e, d, s)] for d in range(jours) for s in shifts) == max_j)
             
-            model = cp_model.CpModel()
-            x = {}
-            for e in range(total_salaries):
-                for d in range(jours):
-                    for s in shifts:
-                        x[(e, d, s)] = model.NewBoolVar(f's_{e}_{d}_{s}')
+            # Repos et cycles
+            for d in range(jours): model.AddAtMostOne(x[(e, d, s)] for s in shifts)
+            for d in range(jours - 1): model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
             
-            # --- RÈGLES PAR SOIGNANT ---
-            for e in range(total_salaries):
-                # 1. Contrat exact
-                model.Add(sum(x[(e, d, s)] for d in range(jours) for s in shifts) == max_jours_contrat[e])
-                
-                # 2. Max 1 poste par jour
-                for d in range(jours):
-                    model.AddAtMostOne(x[(e, d, s)] for s in shifts)
-                
-                # 3. Interdiction A -> M
-                for d in range(jours - 1):
-                    model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
-                
-                # 4. Week-ends et Plafond strict
-                we_vars = []
-                for w in range(nb_semaines):
-                    sat, sun = w * 7 + 5, w * 7 + 6
-                    is_we_worked = model.NewBoolVar(f'is_we_worked_{e}_{w}')
-                    
-                    # Samedi = Dimanche (Bloc)
-                    for s in shifts:
-                        model.Add(x[(e, sat, s)] == x[(e, sun, s)])
-                    
-                    # Détection si WE travaillé
-                    model.AddMaxEquality(is_we_worked, [x[(e, sat, s)] for s in shifts])
-                    we_vars.append(is_we_worked)
-                    
-                    # RÈGLE 6j/4j : Max 6j si WE travaillé, Max 4j sinon
-                    jours_semaine = range(w * 7, w * 7 + 7)
-                    total_semaine = sum(x[(e, d, s)] for d in jours_semaine for s in shifts)
-                    model.Add(total_semaine <= 4 + (2 * is_we_worked))
+            we_vars = []
+            for w in range(nb_semaines):
+                sat, sun = w * 7 + 5, w * 7 + 6
+                is_we = model.NewBoolVar(f'we_{e}_{w}')
+                for s in shifts: model.Add(x[(e, sat, s)] == x[(e, sun, s)])
+                model.AddMaxEquality(is_we, [x[(e, sat, s)] for s in shifts])
+                we_vars.append(is_we)
+                # Règle 6j/4j
+                model.Add(sum(x[(e, d, s)] for d in range(w*7, w*7+7) for s in shifts) <= 4 + (2 * is_we))
 
-                # 🛑 LE VERROU : MAXIMUM 3 WEEK-ENDS SUR 4
-                model.Add(sum(we_vars) <= 3)
+            # 🛑 LA RÈGLE D'OR : JAMAIS DEUX WE CONSÉCUTIFS
+            for w in range(nb_semaines - 1):
+                model.Add(we_vars[w] + we_vars[w+1] <= 1)
 
-                # 5. Absences
-                abs_indices = get_absence_indices(abs_raw[e], date_debut, jours)
-                for d in abs_indices:
+            # Absences
+            for d in get_abs(abs_raw[e], date_debut, jours):
+                for s in shifts: model.Add(x[(e, d, s)] == 0)
+
+        # --- RÈGLES POUR LES REMPLAÇANTS ---
+        for e in range(nb_reels, total_staff):
+            for d in range(jours):
+                model.AddAtMostOne(x[(e, d, s)] for s in shifts)
+                # Un remplaçant ne travaille QUE le week-end (pour aider l'équipe)
+                if (d % 7 < 5): 
                     for s in shifts: model.Add(x[(e, d, s)] == 0)
 
-            # --- QUOTAS EHPAD ---
-            for d in range(jours):
-                is_we = (d % 7 >= 5)
-                m_req, a_req, c_req = (6, 3, 2) if is_we else (8, 4, 1)
-                model.Add(sum(x[(e, d, 'M')] for e in range(total_salaries)) >= m_req)
-                model.Add(sum(x[(e, d, 'A')] for e in range(total_salaries)) == a_req)
-                model.Add(sum(x[(e, d, 'C')] for e in range(total_salaries)) == c_req)
+        # --- QUOTAS FIXES DE L'EHPAD ---
+        for d in range(jours):
+            is_we = (d % 7 >= 5)
+            m_r, a_r, c_r = (6, 3, 2) if is_we else (8, 4, 1)
+            model.Add(sum(x[(e, d, 'M')] for e in range(total_staff)) == m_r)
+            model.Add(sum(x[(e, d, 'A')] for e in range(total_staff)) == a_r)
+            model.Add(sum(x[(e, d, 'C')] for e in range(total_staff)) == c_r)
 
-            # --- OPTIMISATION DU CONFORT (SOUPLY) ---
-            penalites = []
-            for e in range(total_salaries):
-                for w in range(nb_semaines - 1):
-                    # On préfère éviter les WE de suite quand c'est possible
-                    p_consec = model.NewBoolVar(f'p_consec_{e}_{w}')
-                    model.Add(we_vars[w] + we_vars[w+1] <= 1 + p_consec)
-                    penalites.append(p_consec * 50)
+        # --- OBJECTIF : UTILISER LE MOINS DE REMPLAÇANTS POSSIBLE ---
+        # On pénalise l'utilisation des remplaçants pour que l'IA privilégie les vrais gens
+        usage_remplacants = sum(x[(e, d, s)] for e in range(nb_reels, total_staff) for d in range(jours) for s in shifts)
+        model.Minimize(usage_remplacants)
+
+        solver = cp_model.CpSolver()
+        status = solver.Solve(model)
+
+        if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+            st.success("✅ Planning généré ! Les repos consécutifs sont garantis.")
             
-            model.Minimize(sum(penalites))
-
-            # --- CALCUL ---
-            solver = cp_model.CpSolver()
-            solver.parameters.max_time_in_seconds = 40.0
-            status = solver.Solve(model)
-
-            if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-                st.success("✅ Planning conforme généré (Max 3 WE respecté).")
-                
-                planning_data, audit_data = [], []
-                for e in range(total_salaries):
-                    ligne, j_travailles, we_count = [], 0, 0
-                    abs_idx = get_absence_indices(abs_raw[e], date_debut, jours)
+            planning_data, noms_finaux = [], []
+            for e in range(total_staff):
+                # On ne garde le remplaçant que s'il a au moins un jour de travail
+                total_work = sum(solver.Value(x[(e, d, s)]) for d in range(jours) for s in shifts)
+                if e < nb_reels or total_work > 0:
+                    ligne, j_t, we_t = [], 0, 0
                     for d in range(jours):
-                        poste = "CONGÉ" if d in abs_idx else "Repos"
+                        poste = "Repos"
                         for s in shifts:
-                            if solver.Value(x[(e, d, s)]) == 1:
-                                poste, j_travailles = s, j_travailles + 1
-                        if d % 7 == 6 and poste not in ["Repos", "CONGÉ"]: we_count += 1
+                            if solver.Value(x[(e, d, s)]) == 1: poste, j_t = s, j_t + 1
+                        if d % 7 == 6 and poste != "Repos": we_t += 1
                         ligne.append(poste)
                     planning_data.append(ligne)
-                    audit_data.append(f"✅ {j_travailles}j | {we_count} WE")
+                    noms_finaux.append(noms_complets[e])
 
-                df = pd.DataFrame(planning_data, columns=[(date_debut + timedelta(days=i)).strftime('%a %d/%m') for i in range(jours)], index=noms_salaries)
-                df['AUDIT'] = audit_data
+            df = pd.DataFrame(planning_data, columns=[(date_debut + timedelta(days=i)).strftime('%a %d/%m') for i in range(jours)], index=noms_finaux)
+            
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, sheet_name='Planning')
+                workbook, worksheet = writer.book, writer.sheets['Planning']
+                f_m, f_a, f_c = workbook.add_format({'bg_color': '#D4EFDF'}), workbook.add_format({'bg_color': '#FCF3CF'}), workbook.add_format({'bg_color': '#FADBD8'})
+                f_remp = workbook.add_format({'bg_color': '#E67E22', 'font_color': '#FFFFFF', 'bold': True}) # Orange pour les remplaçants
+                f_we = workbook.add_format({'bg_color': '#EBEDEF'})
                 
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, sheet_name='Planning')
-                    workbook, worksheet = writer.book, writer.sheets['Planning']
-                    f_m = workbook.add_format({'bg_color': '#D4EFDF', 'align': 'center'})
-                    f_a = workbook.add_format({'bg_color': '#FCF3CF', 'align': 'center'})
-                    f_c = workbook.add_format({'bg_color': '#FADBD8', 'align': 'center'})
-                    f_abs = workbook.add_format({'bg_color': '#000000', 'font_color': '#FFFFFF', 'align': 'center'})
-                    f_we = workbook.add_format({'bg_color': '#EBEDEF', 'align': 'center'})
-                    
-                    worksheet.set_column('A:A', 25)
-                    worksheet.set_column(1, jours, 8)
-                    for r in range(total_salaries):
-                        for c in range(jours):
-                            val = df.iloc[r, c]
-                            fmt = f_m if val == 'M' else f_a if val == 'A' else f_c if val == 'C' else f_abs if val == 'CONGÉ' else None
-                            if val == 'Repos' and (c % 7 >= 5): fmt = f_we
-                            worksheet.write(r + 1, c + 1, val, fmt)
-                
-                st.download_button("📥 TÉLÉCHARGER LE PLANNING", output.getvalue(), "Planning_Final.xlsx")
-            else:
-                st.error("❌ Impossible de respecter la limite des 3 WE avec cet effectif et ces absences. Embauchez ou réduisez les congés !")
+                worksheet.set_column('A:A', 25)
+                for r in range(len(noms_finaux)):
+                    is_remp = "REMPLAÇANT" in noms_finaux[r]
+                    for c in range(jours):
+                        val = df.iloc[r, c]
+                        fmt = f_remp if is_remp and val != "Repos" else f_m if val == 'M' else f_a if val == 'A' else f_c if val == 'C' else None
+                        if val == 'Repos' and (c % 7 >= 5): fmt = f_we
+                        worksheet.write(r + 1, c + 1, val, fmt)
+            
+            st.download_button("📥 TÉLÉCHARGER LE PLANNING", output.getvalue(), "Planning_Repos_Garanti.xlsx")
+        else:
+            st.error("❌ Même avec des remplaçants, le calcul échoue. Vérifiez les quotas de semaine.")
