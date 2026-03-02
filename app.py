@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Générateur Planning EHPAD", page_icon="🏥", layout="wide")
 st.title("🏥 Générateur de Planning Soignants (IA)")
-st.markdown("Version **Contrats & Cycles** : Respect strict du rythme 6j/4j et gestion des congés.")
+st.markdown("Version **Sécurité Totale** : Max 3 WE, Rythme 6j/4j et gestion des congés.")
 
 # --- 2. INTERFACE ---
 col1, col2 = st.columns([1, 3])
@@ -19,7 +19,7 @@ with col1:
 
 with col2:
     st.subheader("👥 Équipe & Absences")
-    st.info("Format absences : '01/05' ou '01/05-05/05'.")
+    st.info("Format absences : '01/05' ou '01/05-05/05'. Max 3 WE travaillés par personne.")
     
     data_base = pd.DataFrame({
         "Nom": [f"Soignant 100% (n°{i+1})" for i in range(15)] + [f"Soignant 80% (n°{i+1})" for i in range(3)],
@@ -50,8 +50,9 @@ def get_absence_indices(text, start_date, nb_days):
     return list(set(indices))
 
 # --- 3. MOTEUR IA ---
-if st.button("🚀 GÉNÉRER LE PLANNING OPTIMISÉ", type="primary", use_container_width=True):
+if st.button("🚀 GÉNÉRER LE PLANNING (MAX 3 WE)", type="primary", use_container_width=True):
     
+    # Nettoyage
     df_equipe['Contrat (%)'] = pd.to_numeric(df_equipe['Contrat (%)'], errors='coerce')
     df_equipe = df_equipe.dropna(subset=['Nom', 'Contrat (%)'])
     noms_salaries = df_equipe["Nom"].tolist()
@@ -60,11 +61,11 @@ if st.button("🚀 GÉNÉRER LE PLANNING OPTIMISÉ", type="primary", use_contain
     total_salaries = len(noms_salaries)
     
     if total_salaries == 0:
-        st.error("⚠️ Équipe vide.")
+        st.error("⚠️ L'équipe est vide.")
     else:
-        with st.spinner("Calcul du planning idéal (respect des cycles 6j/4j)..."):
+        with st.spinner("L'IA verrouille les week-ends et calcule le cycle 6j/4j..."):
             jours = nb_semaines * 7
-            max_jours = [int((c / 100) * 5 * nb_semaines) for c in contrats]
+            max_jours_contrat = [int((c / 100) * 5 * nb_semaines) for c in contrats]
             shifts = ['M', 'A', 'C']
             
             model = cp_model.CpModel()
@@ -74,41 +75,42 @@ if st.button("🚀 GÉNÉRER LE PLANNING OPTIMISÉ", type="primary", use_contain
                     for s in shifts:
                         x[(e, d, s)] = model.NewBoolVar(f's_{e}_{d}_{s}')
             
-            # --- RÈGLES STRUCTURELLES ---
+            # --- RÈGLES PAR SOIGNANT ---
             for e in range(total_salaries):
-                # 1. Respect du contrat
-                model.Add(sum(x[(e, d, s)] for d in range(jours) for s in shifts) == max_jours[e])
+                # 1. Contrat exact
+                model.Add(sum(x[(e, d, s)] for d in range(jours) for s in shifts) == max_jours_contrat[e])
                 
-                # 2. Un seul poste par jour
+                # 2. Max 1 poste par jour
                 for d in range(jours):
                     model.AddAtMostOne(x[(e, d, s)] for s in shifts)
                 
-                # 3. Pas d'enchaînement Après-midi -> Matin
+                # 3. Interdiction A -> M
                 for d in range(jours - 1):
                     model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
                 
-                # 4. Week-ends en bloc et gestion des cycles
+                # 4. Week-ends et Plafond strict
                 we_vars = []
                 for w in range(nb_semaines):
                     sat, sun = w * 7 + 5, w * 7 + 6
-                    w_worked = model.NewBoolVar(f'we_worked_{e}_{w}')
+                    is_we_worked = model.NewBoolVar(f'is_we_worked_{e}_{w}')
+                    
+                    # Samedi = Dimanche (Bloc)
                     for s in shifts:
-                        model.Add(x[(e, sat, s)] == x[(e, sun, s)]) # Bloc
+                        model.Add(x[(e, sat, s)] == x[(e, sun, s)])
                     
-                    # Est-ce que ce WE est travaillé ?
-                    model.AddMaxEquality(w_worked, [x[(e, sat, s)] for s in shifts])
-                    we_vars.append(w_worked)
+                    # Détection si WE travaillé
+                    model.AddMaxEquality(is_we_worked, [x[(e, sat, s)] for s in shifts])
+                    we_vars.append(is_we_worked)
                     
-                    # 🛑 LA RÈGLE 6j / 4j
-                    # Somme des jours travaillés du Lundi au Dimanche
+                    # RÈGLE 6j/4j : Max 6j si WE travaillé, Max 4j sinon
                     jours_semaine = range(w * 7, w * 7 + 7)
                     total_semaine = sum(x[(e, d, s)] for d in jours_semaine for s in shifts)
-                    
-                    # Si WE travaillé (w_worked=1) -> max 6 jours. Si non -> max 4 jours.
-                    # Formule : total_semaine <= 4 + (2 * w_worked)
-                    model.Add(total_semaine <= 4 + (2 * w_worked))
+                    model.Add(total_semaine <= 4 + (2 * is_we_worked))
 
-                # 5. Gestion des Absences
+                # 🛑 LE VERROU : MAXIMUM 3 WEEK-ENDS SUR 4
+                model.Add(sum(we_vars) <= 3)
+
+                # 5. Absences
                 abs_indices = get_absence_indices(abs_raw[e], date_debut, jours)
                 for d in abs_indices:
                     for s in shifts: model.Add(x[(e, d, s)] == 0)
@@ -124,8 +126,8 @@ if st.button("🚀 GÉNÉRER LE PLANNING OPTIMISÉ", type="primary", use_contain
             # --- OPTIMISATION DU CONFORT (SOUPLY) ---
             penalites = []
             for e in range(total_salaries):
-                # On réutilise les we_vars créés plus haut
                 for w in range(nb_semaines - 1):
+                    # On préfère éviter les WE de suite quand c'est possible
                     p_consec = model.NewBoolVar(f'p_consec_{e}_{w}')
                     model.Add(we_vars[w] + we_vars[w+1] <= 1 + p_consec)
                     penalites.append(p_consec * 50)
@@ -138,20 +140,19 @@ if st.button("🚀 GÉNÉRER LE PLANNING OPTIMISÉ", type="primary", use_contain
             status = solver.Solve(model)
 
             if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-                st.success("✅ Planning équilibré généré !")
+                st.success("✅ Planning conforme généré (Max 3 WE respecté).")
                 
                 planning_data, audit_data = [], []
                 for e in range(total_salaries):
                     ligne, j_travailles, we_count = [], 0, 0
-                    abs_indices = get_absence_indices(abs_raw[e], date_debut, jours)
+                    abs_idx = get_absence_indices(abs_raw[e], date_debut, jours)
                     for d in range(jours):
-                        poste = "CONGÉ" if d in abs_indices else "Repos"
+                        poste = "CONGÉ" if d in abs_idx else "Repos"
                         for s in shifts:
                             if solver.Value(x[(e, d, s)]) == 1:
                                 poste, j_travailles = s, j_travailles + 1
                         if d % 7 == 6 and poste not in ["Repos", "CONGÉ"]: we_count += 1
                         ligne.append(poste)
-                    
                     planning_data.append(ligne)
                     audit_data.append(f"✅ {j_travailles}j | {we_count} WE")
 
@@ -177,6 +178,6 @@ if st.button("🚀 GÉNÉRER LE PLANNING OPTIMISÉ", type="primary", use_contain
                             if val == 'Repos' and (c % 7 >= 5): fmt = f_we
                             worksheet.write(r + 1, c + 1, val, fmt)
                 
-                st.download_button("📥 TÉLÉCHARGER LE PLANNING", output.getvalue(), "Planning_EHPAD.xlsx")
+                st.download_button("📥 TÉLÉCHARGER LE PLANNING", output.getvalue(), "Planning_Final.xlsx")
             else:
-                st.error("❌ Impossible de respecter les cycles 6j/4j avec ces absences. Vérifiez vos quotas ou vos congés.")
+                st.error("❌ Impossible de respecter la limite des 3 WE avec cet effectif et ces absences. Embauchez ou réduisez les congés !")
