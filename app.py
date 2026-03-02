@@ -5,157 +5,191 @@ import math
 from ortools.sat.python import cp_model
 from datetime import datetime, timedelta
 
-# --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Générateur Planning EHPAD", page_icon="🏥", layout="wide")
-st.title("🏥 Générateur de Planning Soignants (IA)")
-st.markdown("**Version Increvable :** Repos garantis, les remplaçants bouchent tous les trous (semaine et WE).")
+# --- 1. CONFIGURATION DE L'INTERFACE ---
+st.set_page_config(page_title="Optimisation Planning EHPAD", page_icon="🏥", layout="wide")
+st.title("🏥 Système d'Ajustement des Ressources Humaines")
+st.markdown("Génération de planning sous contraintes conventionnelles et optimisation de la charge de travail.")
 
-# --- 2. INTERFACE ---
+# --- 2. PARAMÈTRES D'ENTRÉE ---
 col1, col2 = st.columns([1, 3])
 with col1:
-    st.subheader("⚙️ Paramètres")
-    nb_semaines = st.number_input("Nombre de semaines :", min_value=2, max_value=12, value=4)
-    date_debut = st.date_input("Date de début (Lundi) :", value=datetime.today())
+    st.subheader("Paramètres de session")
+    nb_semaines = st.number_input("Durée du cycle (semaines) :", min_value=2, max_value=12, value=4)
+    date_debut = st.date_input("Date d'effet (Lundi) :", value=datetime.today())
 
 with col2:
-    st.subheader("👥 Équipe & Absences")
-    st.info("L'IA donnera la priorité à votre équipe et n'utilisera des remplaçants qu'en cas de nécessité absolue.")
+    st.subheader("Registre du Personnel & Absences")
+    st.caption("Format des absences : '01/05' ou '01/05-05/05'. Les colonnes vides sont ignorées.")
+    
     data_base = pd.DataFrame({
-        "Nom": [f"Soignant 100% (n°{i+1})" for i in range(15)] + [f"Soignant 80% (n°{i+1})" for i in range(3)],
+        "Nom": [f"Salarié {i+1}" for i in range(15)] + [f"Salarié {i+16}" for i in range(3)],
         "Contrat (%)": [100]*15 + [80]*3,
-        "Absences / Congés": [""] * 18
+        "Congés / Absences": [""] * 18
     })
     df_equipe = st.data_editor(data_base, num_rows="dynamic", use_container_width=True)
 
-# --- FONCTION DATES ---
-def get_abs(text, start_date, nb_days):
+# --- UTILITAIRE DE TRAITEMENT DES DATES ---
+def extraire_indices_absences(texte, date_ref, total_jours):
     indices = []
-    if not text or pd.isna(text): return indices
-    for part in str(text).replace(' ', '').split(','):
+    if not texte or pd.isna(texte): return indices
+    segments = str(texte).replace(' ', '').split(',')
+    for segment in segments:
         try:
-            if '-' in part:
-                d1_s, d2_s = part.split('-')
-                d1 = datetime.strptime(d1_s + f"/{start_date.year}", "%d/%m/%Y").date()
-                d2 = datetime.strptime(d2_s + f"/{start_date.year}", "%d/%m/%Y").date()
+            if '-' in segment:
+                d1_s, d2_s = segment.split('-')
+                d1 = datetime.strptime(d1_s + f"/{date_ref.year}", "%d/%m/%Y").date()
+                d2 = datetime.strptime(d2_s + f"/{date_ref.year}", "%d/%m/%Y").date()
                 for i in range((d2 - d1).days + 1):
-                    diff = (d1 + timedelta(days=i) - start_date).days
-                    if 0 <= diff < nb_days: indices.append(diff)
+                    ecart = (d1 + timedelta(days=i) - date_ref).days
+                    if 0 <= ecart < total_jours: indices.append(ecart)
             else:
-                day = datetime.strptime(part + f"/{start_date.year}", "%d/%m/%Y").date()
-                diff = (day - start_date).days
-                if 0 <= diff < nb_days: indices.append(diff)
+                cible = datetime.strptime(segment + f"/{date_ref.year}", "%d/%m/%Y").date()
+                ecart = (cible - date_ref).days
+                if 0 <= ecart < total_jours: indices.append(ecart)
         except: continue
     return list(set(indices))
 
-# --- 3. MOTEUR IA ---
-if st.button("🚀 GÉNÉRER LE PLANNING PARFAIT", type="primary", use_container_width=True):
+# --- 3. MOTEUR DE RÉSOLUTION ---
+if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_container_width=True):
     
+    # Nettoyage des données d'entrée
     df_equipe['Contrat (%)'] = pd.to_numeric(df_equipe['Contrat (%)'], errors='coerce')
     df_equipe = df_equipe.dropna(subset=['Nom', 'Contrat (%)'])
-    noms_reels = df_equipe["Nom"].tolist()
-    contrats = df_equipe["Contrat (%)"].tolist()
-    abs_raw = df_equipe["Absences / Congés"].tolist()
     
-    # On prévoit assez de remplaçants pour n'importe quelle situation
-    noms_complets = noms_reels + [f"REMPLAÇANT {i+1}" for i in range(15)]
-    nb_reels = len(noms_reels)
-    total_staff = len(noms_complets)
+    noms_titulaires = df_equipe["Nom"].tolist()
+    valeurs_contrats = df_equipe["Contrat (%)"].tolist()
+    absences_declarees = df_equipe["Congés / Absences"].tolist()
     
-    with st.spinner("L'IA organise les rotations..."):
-        jours = nb_semaines * 7
-        shifts = ['M', 'A', 'C']
+    # Intégration de ressources de remplacement (15 unités disponibles)
+    noms_complets = noms_titulaires + [f"REMPLAÇANT {i+1}" for i in range(15)]
+    nb_titulaires = len(noms_titulaires)
+    total_effectif = len(noms_complets)
+    
+    with st.spinner("Analyse des contraintes réglementaires et optimisation des flux..."):
+        jours_cycle = nb_semaines * 7
+        postes = ['M', 'A', 'C']
         model = cp_model.CpModel()
-        x = {}
-        for e in range(total_staff):
-            for d in range(jours):
-                for s in shifts:
-                    x[(e, d, s)] = model.NewBoolVar(f's_{e}_{d}_{s}')
         
-        # --- RÈGLES SOIGNANTS RÉELS ---
-        for e in range(nb_reels):
-            # Le contrat est un MAXIMUM (si absent, on travaille moins, l'IA complétera avec un remplaçant)
-            max_j = int((contrats[e] / 100) * 5 * nb_semaines)
-            model.Add(sum(x[(e, d, s)] for d in range(jours) for s in shifts) <= max_j)
+        # Définition des variables de décision
+        x = {}
+        for e in range(total_effectif):
+            for d in range(jours_cycle):
+                for p in postes:
+                    x[(e, d, p)] = model.NewBoolVar(f'staff_{e}_{d}_{p}')
+        
+        # --- CONTRAINTES RELATIVES AUX TITULAIRES ---
+        for e in range(nb_titulaires):
+            # Respect de la quotité de travail
+            charge_max = int((valeurs_contrats[e] / 100) * 5 * nb_semaines)
+            model.Add(sum(x[(e, d, p)] for d in range(jours_cycle) for p in postes) <= charge_max)
             
-            for d in range(jours): model.AddAtMostOne(x[(e, d, s)] for s in shifts)
-            for d in range(jours - 1): model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
+            # Unité de poste quotidienne
+            for d in range(jours_cycle):
+                model.AddAtMostOne(x[(e, d, p)] for p in postes)
             
-            we_vars = []
+            # Temps de repos minimum (Interdiction Après-midi -> Matin)
+            for d in range(jours_cycle - 1):
+                model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
+            
+            # Gestion des cycles de week-end
+            indicateurs_we = []
             for w in range(nb_semaines):
                 sat, sun = w * 7 + 5, w * 7 + 6
-                is_we = model.NewBoolVar(f'we_{e}_{w}')
-                for s in shifts: model.Add(x[(e, sat, s)] == x[(e, sun, s)])
-                model.AddMaxEquality(is_we, [x[(e, sat, s)] for s in shifts])
-                we_vars.append(is_we)
-                # Rythme 6j/4j
-                model.Add(sum(x[(e, d, s)] for d in range(w*7, w*7+7) for s in shifts) <= 4 + (2 * is_we))
+                actif_we = model.NewBoolVar(f'actif_we_{e}_{w}')
+                for p in postes:
+                    model.Add(x[(e, sat, p)] == x[(e, sun, p)]) # Continuité du bloc WE
+                
+                model.AddMaxEquality(actif_we, [x[(e, sat, p)] for p in postes])
+                indicateurs_we.append(actif_we)
+                
+                # Rythme hebdomadaire 6j / 4j
+                periode = range(w * 7, w * 7 + 7)
+                charge_hebdo = sum(x[(e, d, p)] for d in periode for p in postes)
+                model.Add(charge_hebdo <= 4 + (2 * actif_we))
 
-            # 🛑 RÈGLE STRICTE : PAS DE WEEK-ENDS CONSÉCUTIFS
+            # Interdiction de week-ends consécutifs
             for w in range(nb_semaines - 1):
-                model.Add(we_vars[w] + we_vars[w+1] <= 1)
+                model.Add(indicateurs_we[w] + indicateurs_we[w+1] <= 1)
 
-            # Absences
-            for d in get_abs(abs_raw[e], date_debut, jours):
-                for s in shifts: model.Add(x[(e, d, s)] == 0)
+            # Sanctuarisation des absences
+            indices_abs = extraire_indices_absences(absences_declarees[e], date_debut, jours_cycle)
+            for d in indices_abs:
+                for p in postes: model.Add(x[(e, d, p)] == 0)
 
-        # --- RÈGLES REMPLAÇANTS ---
-        for e in range(nb_reels, total_staff):
-            for d in range(jours):
-                model.AddAtMostOne(x[(e, d, s)] for s in shifts)
+        # --- CONTRAINTES RELATIVES AUX REMPLAÇANTS ---
+        for e in range(nb_titulaires, total_effectif):
+            for d in range(jours_cycle):
+                model.AddAtMostOne(x[(e, d, p)] for p in postes)
+                
+                # Continuité Week-end : le même remplaçant travaille samedi et dimanche
+                if d % 7 == 5: # Samedi
+                    for p in postes:
+                        model.Add(x[(e, d, p)] == x[(e, d+1, p)])
+            
+            # Note : Les remplaçants n'ont pas la contrainte 'A' -> 'M'
 
-        # --- QUOTAS FIXES EHPAD ---
-        for d in range(jours):
+        # --- QUOTAS DE SERVICE ---
+        for d in range(jours_cycle):
             is_we = (d % 7 >= 5)
-            m_r, a_r, c_r = (6, 3, 2) if is_we else (8, 4, 1)
-            model.Add(sum(x[(e, d, 'M')] for e in range(total_staff)) == m_r)
-            model.Add(sum(x[(e, d, 'A')] for e in range(total_staff)) == a_r)
-            model.Add(sum(x[(e, d, 'C')] for e in range(total_staff)) == c_r)
+            m_target, a_target, c_target = (6, 3, 2) if is_we else (8, 4, 1)
+            model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) == m_target)
+            model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) == a_target)
+            model.Add(sum(x[(e, d, 'C')] for e in range(total_effectif)) == c_target)
 
-        # --- OBJECTIF MULTIPLE ---
-        # 1. Maximiser le travail de l'équipe réelle (pour coller au contrat)
-        # 2. Minimiser l'usage des remplaçants
-        obj_reels = sum(x[(e, d, s)] for e in range(nb_reels) for d in range(jours) for s in shifts)
-        obj_remp = sum(x[(e, d, s)] for e in range(nb_reels, total_staff) for d in range(jours) for s in shifts)
-        model.Maximize(obj_reels * 10 - obj_remp)
+        # --- OPTIMISATION ---
+        # Priorité à l'utilisation des ressources internes (Titulaires)
+        poids_titulaire = sum(x[(e, d, p)] for e in range(nb_titulaires) for d in range(jours_cycle) for p in postes)
+        poids_remplacant = sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for d in range(jours_cycle) for p in postes)
+        model.Maximize(poids_titulaire * 10 - poids_remplacant)
 
         solver = cp_model.CpSolver()
-        status = solver.Solve(model)
+        statut = solver.Solve(model)
 
-        if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("✅ Planning généré ! Les repos sont protégés.")
+        if statut in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+            st.success("Planning généré conformément aux contraintes de repos.")
             
-            planning_data, noms_finaux = [], []
-            for e in range(total_staff):
-                total_work = sum(solver.Value(x[(e, d, s)]) for d in range(jours) for s in shifts)
-                if e < nb_reels or total_work > 0:
-                    ligne = []
-                    for d in range(jours):
-                        poste = "Repos"
-                        for s in shifts:
-                            if solver.Value(x[(e, d, s)]) == 1: poste = s
-                        ligne.append(poste)
-                    planning_data.append(ligne)
-                    noms_finaux.append(noms_complets[e])
+            resultats, noms_utilises = [], []
+            for e in range(total_effectif):
+                total_activite = sum(solver.Value(x[(e, d, p)]) for d in range(jours_cycle) for p in postes)
+                if e < nb_titulaires or total_activite > 0:
+                    ligne_planning = []
+                    for d in range(jours_cycle):
+                        valeur = "Repos"
+                        for p in postes:
+                            if solver.Value(x[(e, d, p)]) == 1: valeur = p
+                        ligne_planning.append(valeur)
+                    resultats.append(ligne_planning)
+                    noms_utilises.append(noms_complets[e])
 
-            df = pd.DataFrame(planning_data, columns=[(date_debut + timedelta(days=i)).strftime('%a %d/%m') for i in range(jours)], index=noms_finaux)
+            df_final = pd.DataFrame(resultats, columns=[(date_debut + timedelta(days=i)).strftime('%a %d/%m') for i in range(jours_cycle)], index=noms_utilises)
             
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, sheet_name='Planning')
-                workbook, ws = writer.book, writer.sheets['Planning']
-                f_m, f_a, f_c = workbook.add_format({'bg_color': '#D4EFDF'}), workbook.add_format({'bg_color': '#FCF3CF'}), workbook.add_format({'bg_color': '#FADBD8'})
-                f_remp = workbook.add_format({'bg_color': '#E67E22', 'font_color': '#FFFFFF'})
-                f_we = workbook.add_format({'bg_color': '#EBEDEF'})
+            # --- GÉNÉRATION EXCEL ---
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                df_final.to_excel(writer, sheet_name='Planning_Operationnel')
+                wb, ws = writer.book, writer.sheets['Planning_Operationnel']
                 
-                ws.set_column('A:A', 25)
-                for r in range(len(noms_finaux)):
-                    is_remp = "REMPLAÇANT" in noms_finaux[r]
-                    for c in range(jours):
-                        val = df.iloc[r, c]
-                        fmt = f_remp if is_remp and val != "Repos" else f_m if val == 'M' else f_a if val == 'A' else f_c if val == 'C' else None
-                        if val == 'Repos' and (c % 7 >= 5): fmt = f_we
-                        ws.write(r + 1, c + 1, val, fmt)
+                # Formats de cellule
+                fmt_m = wb.add_format({'bg_color': '#D4EFDF', 'align': 'center', 'border': 1})
+                fmt_a = wb.add_format({'bg_color': '#FCF3CF', 'align': 'center', 'border': 1})
+                fmt_c = wb.add_format({'bg_color': '#FADBD8', 'align': 'center', 'border': 1})
+                fmt_remp = wb.add_format({'bg_color': '#E67E22', 'font_color': '#FFFFFF', 'bold': True, 'border': 1})
+                fmt_we = wb.add_format({'bg_color': '#F2F4F4', 'border': 1})
+                
+                ws.set_column('A:A', 30)
+                for r_idx in range(len(noms_utilises)):
+                    est_remplacant = "REMPLAÇANT" in noms_utilises[r_idx]
+                    for c_idx in range(jours_cycle):
+                        val = df_final.iloc[r_idx, c_idx]
+                        if est_remplacant and val != "Repos":
+                            format_cible = fmt_remp
+                        elif val == 'M': format_cible = fmt_m
+                        elif val == 'A': format_cible = fmt_a
+                        elif val == 'C': format_cible = fmt_c
+                        elif c_idx % 7 >= 5: format_cible = fmt_we
+                        else: format_cible = None
+                        ws.write(r_idx + 1, c_idx + 1, val, format_cible)
             
-            st.download_button("📥 TÉLÉCHARGER LE PLANNING", output.getvalue(), "Planning_Garantie_Repos.xlsx")
+            st.download_button("📥 EXTRAIRE LE PLANNING (EXCEL)", buffer.getvalue(), f"Planning_RH_{date_debut}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.error("❌ Erreur de structure majeure. Vérifiez que la date de début est bien un Lundi.")
+            st.error("Aucune solution compatible avec les contraintes actuelles. Veuillez réviser les absences ou augmenter les ressources.")
