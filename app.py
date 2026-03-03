@@ -61,11 +61,11 @@ with st.sidebar:
     nb_semaines = st.number_input("Durée du cycle (semaines)", min_value=4, max_value=12, value=4, step=4, help="Sélectionnez un multiple de 4 pour garantir l'équilibre des contrats.")
     
     st.markdown("---")
-    st.markdown("**Paramètres du Moteur (v14.0)**")
+    st.markdown("**Paramètres du Moteur (v14.1)**")
     st.markdown("""
     <ul style='font-size: 13px; color: #5D6D7E; padding-left: 20px;'>
         <li>Matrice de roulement perpétuelle</li>
-        <li>Respect strict des 20j (100%) / 16j (80%)</li>
+        <li>Respect strict des contrats</li>
         <li>Limitation légale : Max 4j consécutifs</li>
         <li>Renforts gérés automatiquement (Matin)</li>
         <li>Répartition équitable des coupés (C)</li>
@@ -95,7 +95,6 @@ data_base = pd.DataFrame({
     "Contrat (%)": [100]*15 + [80]*3
 })
 
-# Tableau de saisie plus propre
 df_equipe = st.data_editor(data_base, num_rows="dynamic", use_container_width=True, hide_index=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
@@ -109,7 +108,6 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
     noms_titulaires = df_equipe["Nom"].tolist()
     valeurs_contrats = df_equipe["Contrat (%)"].tolist()
     
-    # Remplaçants stricts
     noms_complets = noms_titulaires + ["VACATAIRE 1", "VACATAIRE 2"]
     nb_titulaires = len(noms_titulaires)
     total_effectif = len(noms_complets)
@@ -164,7 +162,7 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
             for w in range(nb_semaines): 
                 model.Add(ind_we[w] + ind_we[(w + 1) % nb_semaines] <= 1)
 
-        # --- LOGIQUE VACATAIRES (Uniquement WE) ---
+        # --- LOGIQUE VACATAIRES ---
         for e in range(nb_titulaires, total_effectif):
             cibles_travail.append("Vac.") 
             for d in range(jours_cycle):
@@ -199,7 +197,7 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
             for e in range(total_effectif):
                 ligne, j_t, c_s, c_w = [], 0, 0, 0
                 for d in range(jours_cycle):
-                    v = "" # Vide au lieu de "Repos" pour alléger visuellement
+                    v = "" 
                     for p in postes:
                         if solver.Value(x[(e, d, p)]) == 1: 
                             v, j_t = p, j_t + 1
@@ -218,25 +216,22 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                 else:
                     audit_data.append(f"VACATION | {j_t}j WE")
 
-            # --- EXPORT EXCEL ULTRA PRO ---
+            # --- EXPORT EXCEL ---
             df_final = pd.DataFrame(resultats, index=noms_utilises)
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                # Démarrage ligne 6 pour laisser la place au Header pro
                 df_final.to_excel(writer, sheet_name='Matrice RH', startrow=6, header=False)
                 wb, ws = writer.book, writer.sheets['Matrice RH']
                 
-                # --- PALETTE CORPORATE ---
-                f_titre = wb.add_format({'bold': True, 'font_size': 18, 'align': 'left', 'valign': 'vcenter', 'font_color': '#1A252F'})
-                f_date = wb.add_format({'font_size': 10, 'align': 'left', 'font_color': '#7F8C8D', 'italic': True})
+                # Formats
+                f_titre = wb.add_format({'bold': True, 'font_size': 18, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#2C3E50', 'font_color': 'white'})
+                f_date = wb.add_format({'font_size': 10, 'align': 'center', 'font_color': '#7F8C8D', 'italic': True})
                 
-                # Légende
                 f_leg_m = wb.add_format({'bg_color': '#D4E6F1', 'font_color': '#154360', 'align': 'center', 'border': 1, 'bold': True})
                 f_leg_a = wb.add_format({'bg_color': '#FCF3CF', 'font_color': '#7D6608', 'align': 'center', 'border': 1, 'bold': True})
                 f_leg_c = wb.add_format({'bg_color': '#FADBD8', 'font_color': '#78281F', 'align': 'center', 'border': 1, 'bold': True})
                 f_leg_txt = wb.add_format({'align': 'left', 'valign': 'vcenter'})
                 
-                # Tableau
                 f_sem = wb.add_format({'bold': True, 'bg_color': '#34495E', 'font_color': 'white', 'border': 1, 'align': 'center'})
                 f_jour = wb.add_format({'bold': True, 'bg_color': '#ECF0F1', 'font_color': '#2C3E50', 'border': 1, 'align': 'center'})
                 
@@ -247,19 +242,19 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                 f_repos = wb.add_format({'bg_color': '#FFFFFF', 'border': 1})
                 f_audit = wb.add_format({'font_color': '#34495E', 'font_size': 10, 'border': 1, 'bg_color': '#FDFEFE', 'align': 'center'})
                 
-                # Configuration grille
                 ws.set_column('A:A', 28)
                 ws.set_column(1, jours_cycle, 5)
                 ws.set_column(jours_cycle+1, jours_cycle+1, 35)
                 ws.set_default_row(20)
                 ws.freeze_panes(6, 1)
                 
-                # --- EN-TÊTE ---
+                # --- CORRECTION DE L'EN-TÊTE ---
+                # On utilise merge_range de 0 à jours_cycle+1 pour que ça prenne toute la largeur du tableau
                 date_gen = datetime.now().strftime('%d/%m/%Y à %H:%M')
-                ws.write(0, 0, "MATRICE DE ROULEMENT EHPAD", f_titre)
-                ws.write(1, 0, f"Document généré le {date_gen} | Cycle : {nb_semaines} semaines", f_date)
+                ws.merge_range(0, 0, 0, jours_cycle + 1, "MATRICE DE ROULEMENT EHPAD", f_titre)
+                ws.merge_range(1, 0, 1, jours_cycle + 1, f"Document généré le {date_gen} | Cycle : {nb_semaines} semaines", f_date)
                 
-                # Légende intégrée
+                # Légende
                 ws.write(3, 0, "Légende des postes :", wb.add_format({'bold': True}))
                 ws.write(3, 1, "M", f_leg_m)
                 ws.write(3, 2, "Matin", f_leg_txt)
@@ -268,19 +263,18 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                 ws.write(3, 5, "C", f_leg_c)
                 ws.write(3, 6, "Coupé", f_leg_txt)
                 
-                # --- STRUCTURE TABLEAU ---
-                # Ligne des Semaines
+                # Semaines
                 for w in range(nb_semaines):
                     ws.merge_range(4, (w*7)+1, 4, (w*7)+7, f"SEMAINE {w+1}", f_sem)
                 
-                # Ligne des Jours
+                # Jours
                 ws.write(5, 0, "Employés", f_jour)
                 jours_lettres = ["L", "M", "M", "J", "V", "S", "D"]
                 for c in range(jours_cycle): 
                     ws.write(5, c+1, jours_lettres[c%7], f_jour)
                 ws.write(5, jours_cycle+1, "AUDIT STRUCTUREL", f_jour)
                 
-                # --- DONNÉES ---
+                # Remplissage
                 for r in range(len(noms_utilises)):
                     is_remp = "VACATAIRE" in noms_utilises[r]
                     for c in range(jours_cycle):
