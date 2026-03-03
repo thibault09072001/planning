@@ -6,9 +6,9 @@ from ortools.sat.python import cp_model
 from datetime import datetime, timedelta
 
 # --- 1. CONFIGURATION DE L'INTERFACE ---
-st.set_page_config(page_title="Optimisation Planning EHPAD", page_icon="🏥", layout="wide")
+st.set_page_config(page_title="Optimisation Planning EHPAD", page_icon="🏥", layout="layout="wide")
 st.title("🏥 Système d'Ajustement des Ressources Humaines")
-st.markdown("Génération de planning sous contraintes conventionnelles (Max 4 jours consécutifs, repos WE garantis).")
+st.markdown("Contraintes appliquées : Max 4 jours consécutifs, 9 titulaires + 2 remplaçants par week-end.")
 
 # --- 2. PARAMÈTRES D'ENTRÉE ---
 col1, col2 = st.columns([1, 3])
@@ -60,12 +60,12 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
     valeurs_contrats = df_equipe["Contrat (%)"].tolist()
     absences_declarees = df_equipe["Congés / Absences"].tolist()
     
-    # Intégration de ressources de remplacement
-    noms_complets = noms_titulaires + [f"REMPLAÇANT {i+1}" for i in range(15)]
+    # Intégration de ressources de remplacement (10 suffiront grâce à la règle fixe)
+    noms_complets = noms_titulaires + [f"REMPLAÇANT {i+1}" for i in range(10)]
     nb_titulaires = len(noms_titulaires)
     total_effectif = len(noms_complets)
     
-    with st.spinner("Analyse des contraintes réglementaires et optimisation des flux..."):
+    with st.spinner("Analyse des contraintes et répartition des effectifs (Mix Titulaires/Remplaçants)..."):
         jours_cycle = nb_semaines * 7
         postes = ['M', 'A', 'C']
         model = cp_model.CpModel()
@@ -130,25 +130,33 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
                     for p in postes:
                         model.Add(x[(e, d, p)] == x[(e, d+1, p)])
 
-        # --- QUOTAS DE SERVICE ---
+        # --- QUOTAS DE SERVICE ET MIXITÉ DES WEEK-ENDS ---
         for d in range(jours_cycle):
             is_we = (d % 7 >= 5)
             m_target, a_target, c_target = (6, 3, 2) if is_we else (8, 4, 1)
             model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) == m_target)
             model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) == a_target)
             model.Add(sum(x[(e, d, 'C')] for e in range(total_effectif)) == c_target)
+            
+            # NOUVELLE RÈGLE : Structuration stricte des week-ends
+            if is_we:
+                # Exactement 9 titulaires positionnés sur la journée de week-end
+                model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires) for p in postes) == 9)
+                # Exactement 2 remplaçants positionnés sur la journée de week-end
+                model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for p in postes) == 2)
 
         # --- OPTIMISATION ---
-        # Priorité à l'utilisation des ressources internes (Titulaires)
+        # Priorité à l'utilisation des ressources internes en semaine
         poids_titulaire = sum(x[(e, d, p)] for e in range(nb_titulaires) for d in range(jours_cycle) for p in postes)
         poids_remplacant = sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for d in range(jours_cycle) for p in postes)
         model.Maximize(poids_titulaire * 10 - poids_remplacant)
 
         solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 45.0
         statut = solver.Solve(model)
 
         if statut in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("Planning généré conformément aux contraintes de repos et limitations de jours consécutifs.")
+            st.success("Planning généré. Allocation des week-ends (9 titulaires / 2 remplaçants) respectée.")
             
             resultats, noms_utilises = [], []
             for e in range(total_effectif):
@@ -194,4 +202,4 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
             
             st.download_button("📥 EXTRAIRE LE PLANNING (EXCEL)", buffer.getvalue(), f"Planning_RH_{date_debut.strftime('%d-%m-%Y')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.error("Aucune solution compatible avec les contraintes actuelles. Veuillez vérifier vos paramètres ou planifier des absences.")
+            st.error("Aucune solution compatible. La contrainte des 9 titulaires le week-end est potentiellement bloquée par de trop nombreuses absences.")
