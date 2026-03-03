@@ -3,10 +3,9 @@ import pandas as pd
 import io
 import math
 from ortools.sat.python import cp_model
-from datetime import datetime, timedelta
 
 # --- 1. CONFIGURATION DE L'INTERFACE (MODE PRO) ---
-st.set_page_config(page_title="Système RH | Planning EHPAD", page_icon="🏥", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Système RH | Matrice EHPAD", page_icon="🏥", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
@@ -35,42 +34,35 @@ with st.sidebar:
     
     nb_semaines = st.number_input("⏱️ Durée du cycle (semaines)", min_value=4, max_value=12, value=4, step=4)
     
-    aujourdhui = datetime.today()
-    lundi_par_defaut = aujourdhui - timedelta(days=aujourdhui.weekday())
-    date_debut = st.date_input("📅 Date d'effet (Lundi)", value=lundi_par_defaut)
-    
-    if date_debut.weekday() != 0:
-        st.error("🛑 La date d'effet doit obligatoirement être un Lundi.")
-        st.stop()
-        
     st.markdown("---")
-    st.caption("🔒 Moteur de résolution v10.0 (Trame Cyclique)")
-    st.caption("✓ Roulement Infini (Sem. 4 boucle sur Sem. 1)\n✓ Contrats stricts (20j/16j)\n✓ Max 4j consécutifs strict\n✓ Zéro remplaçant en Semaine\n✓ Coupés : 16x (1/1) + 2x (2/0)")
+    st.caption("🔒 Moteur de résolution v11.0 (Trame Générique)")
+    st.caption("✓ Roulement Infini (Boucle temporel)\n✓ Format Jours (L,M,M...)\n✓ Contrats stricts (20j/16j)\n✓ Max 4j consécutifs\n✓ Coupés : 16x (1/1) + 2x (2/0)")
 
 # --- 3. ESPACE CENTRAL (TABLEAU DE BORD) ---
 st.title("Génération de la Trame de Roulement")
-st.markdown("💡 *Astuce : Pour générer le roulement de base permanent de l'établissement, laissez les absences vides.*")
+st.markdown("💡 *Matrice vierge perpétuelle. Si vous devez bloquer un jour, utilisez son numéro dans le cycle (ex: '1' pour le 1er Lundi, '28' pour le dernier Dimanche).*")
 
 col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
 with col_kpi1:
-    st.metric(label="Jours planifiés", value=nb_semaines * 7)
+    st.metric(label="Jours de la matrice", value=nb_semaines * 7)
 with col_kpi2:
-    st.metric(label="Titulaires requis le Week-end", value="9")
+    st.metric(label="Titulaires (WE)", value="9")
 with col_kpi3:
-    st.metric(label="Remplaçants requis le Week-end", value="2")
+    st.metric(label="Remplaçants (WE)", value="2")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
 data_base = pd.DataFrame({
     "Nom": [f"Salarié {i+1}" for i in range(15)] + [f"Salarié {i+16}" for i in range(3)],
     "Contrat (%)": [100]*15 + [80]*3,
-    "Congés / Absences": [""] * 18
+    "Absence (Jour 1 à 28)": [""] * 18
 })
 
 st.subheader("Registre du Personnel")
 df_equipe = st.data_editor(data_base, num_rows="dynamic", use_container_width=True)
 
-def extraire_indices_absences(texte, date_ref, total_jours):
+# L'extracteur d'absences est adapté pour lire des numéros de jours (1 à N) au lieu de dates
+def extraire_indices_absences(texte, total_jours):
     indices = []
     if not texte or pd.isna(texte): return indices
     segments = str(texte).replace(' ', '').split(',')
@@ -78,15 +70,12 @@ def extraire_indices_absences(texte, date_ref, total_jours):
         try:
             if '-' in segment:
                 d1_s, d2_s = segment.split('-')
-                d1 = datetime.strptime(d1_s + f"/{date_ref.year}", "%d/%m/%Y").date()
-                d2 = datetime.strptime(d2_s + f"/{date_ref.year}", "%d/%m/%Y").date()
-                for i in range((d2 - d1).days + 1):
-                    ecart = (d1 + timedelta(days=i) - date_ref).days
-                    if 0 <= ecart < total_jours: indices.append(ecart)
+                d1, d2 = int(d1_s) - 1, int(d2_s) - 1
+                for i in range(d1, d2 + 1):
+                    if 0 <= i < total_jours: indices.append(i)
             else:
-                cible = datetime.strptime(segment + f"/{date_ref.year}", "%d/%m/%Y").date()
-                ecart = (cible - date_ref).days
-                if 0 <= ecart < total_jours: indices.append(ecart)
+                jour = int(segment) - 1
+                if 0 <= jour < total_jours: indices.append(jour)
         except: continue
     return list(set(indices))
 
@@ -100,13 +89,13 @@ if st.button("🚀 GÉNÉRER LA TRAME DE ROULEMENT", type="primary", use_contain
     
     noms_titulaires = df_equipe["Nom"].tolist()
     valeurs_contrats = df_equipe["Contrat (%)"].tolist()
-    absences_declarees = df_equipe["Congés / Absences"].tolist()
+    absences_declarees = df_equipe["Absence (Jour 1 à 28)"].tolist()
     
     noms_complets = noms_titulaires + ["REMPLAÇANT 1", "REMPLAÇANT 2"]
     nb_titulaires = len(noms_titulaires)
     total_effectif = len(noms_complets)
     
-    with st.spinner("Génération du roulement cyclique (boucle temporelle activée)..."):
+    with st.spinner("Création de la boucle temporelle parfaite (environ 45-60 secondes)..."):
         jours_cycle = nb_semaines * 7
         postes = ['M', 'A', 'C']
         model = cp_model.CpModel()
@@ -122,28 +111,25 @@ if st.button("🚀 GÉNÉRER LA TRAME DE ROULEMENT", type="primary", use_contain
         
         # --- CONTRAINTES TITULAIRES ---
         for e in range(nb_titulaires):
-            indices_abs = extraire_indices_absences(absences_declarees[e], date_debut, jours_cycle)
+            indices_abs = extraire_indices_absences(absences_declarees[e], jours_cycle)
             charge_max = int((valeurs_contrats[e] / 100) * 5 * nb_semaines)
             jours_a_deduire = int(round(len(indices_abs) * (5.0 / 7.0) * (valeurs_contrats[e] / 100.0)))
             cible_jours = charge_max - jours_a_deduire
             cibles_travail.append(cible_jours)
             
-            # Contrat au jour près
             model.Add(sum(x[(e, d, p)] for d in range(jours_cycle) for p in postes) == cible_jours)
             
-            # Un seul poste par jour
             for d in range(jours_cycle): model.AddAtMostOne(x[(e, d, p)] for p in postes)
             
-            # 🛑 1. REPOS CIRCULAIRE : Pas de A suivi de M (y compris Dimanche Sem 4 -> Lundi Sem 1)
+            # Repos Circulaire : Pas de A suivi de M (y compris fin -> début)
             for d in range(jours_cycle): 
-                jour_suivant = (d + 1) % jours_cycle # Le Modulo (%) ramène le jour 28 au jour 0
+                jour_suivant = (d + 1) % jours_cycle 
                 model.AddImplication(x[(e, d, 'A')], x[(e, jour_suivant, 'M')].Not())
             
-            # 🛑 2. MAX 4 JOURS CIRCULAIRE (Le roulement ne casse jamais les repos)
+            # Max 4 Jours Circulaire 
             for d in range(jours_cycle): 
                 model.Add(sum(x[(e, (d+i) % jours_cycle, p)] for i in range(5) for p in postes) <= 4)
             
-            # Coupés
             jours_semaine = [d for d in range(jours_cycle) if d % 7 < 5]
             jours_we = [d for d in range(jours_cycle) if d % 7 >= 5]
             c_sem_var = sum(x[(e, d, 'C')] for d in jours_semaine)
@@ -155,7 +141,6 @@ if st.button("🚀 GÉNÉRER LA TRAME DE ROULEMENT", type="primary", use_contain
                 model.Add(c_sem_var == (1 * mult_cycle) + est_special)
                 model.Add(c_we_var == (1 * mult_cycle) - est_special)
             
-            # Gestion des Week-ends
             indicateurs_we = []
             for w in range(nb_semaines):
                 sat, sun = w * 7 + 5, w * 7 + 6
@@ -166,9 +151,9 @@ if st.button("🚀 GÉNÉRER LA TRAME DE ROULEMENT", type="primary", use_contain
                 periode = range(w * 7, w * 7 + 7)
                 model.Add(sum(x[(e, d, p)] for d in periode for p in postes) <= 4 + (2 * actif_we))
 
-            # 🛑 3. WEEK-ENDS CIRCULAIRES : Pas de WE Sem 4 + WE Sem 1
+            # Week-ends Circulaires : Pas de WE en Sem 4 + WE en Sem 1
             for w in range(nb_semaines): 
-                we_suivant = (w + 1) % nb_semaines # Boucle le dernier week-end sur le premier
+                we_suivant = (w + 1) % nb_semaines 
                 model.Add(indicateurs_we[w] + indicateurs_we[we_suivant] <= 1)
                 
             for d in indices_abs:
@@ -232,7 +217,6 @@ if st.button("🚀 GÉNÉRER LA TRAME DE ROULEMENT", type="primary", use_contain
                         ligne_planning.append(valeur)
                     
                     enchainements_am = 0
-                    # Vérification circulaire pour l'Audit A->M
                     for d in range(jours_cycle):
                         jour_suivant = (d + 1) % jours_cycle
                         if ligne_planning[d] == 'A' and ligne_planning[jour_suivant] == 'M':
@@ -250,17 +234,20 @@ if st.button("🚀 GÉNÉRER LA TRAME DE ROULEMENT", type="primary", use_contain
                     
                     audit_data.append(audit_txt)
 
-            colonnes = [(date_debut + timedelta(days=i)).strftime('%A %d/%m').capitalize() for i in range(jours_cycle)]
+            # --- EXPORT EXCEL PROFESSIONNEL (TRAME) ---
+            colonnes = [f"J{i+1}" for i in range(jours_cycle)]
             df_final = pd.DataFrame(resultats, columns=colonnes, index=noms_utilises)
-            df_final['AUDIT RH'] = audit_data 
             
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df_final.to_excel(writer, sheet_name='Planning', startrow=1)
-                wb, ws = writer.book, writer.sheets['Planning']
+                # header=False pour dessiner nous-mêmes nos en-têtes complexes
+                df_final.to_excel(writer, sheet_name='Trame', startrow=3, header=False)
+                wb, ws = writer.book, writer.sheets['Trame']
                 
                 fmt_titre = wb.add_format({'bold': True, 'font_size': 16, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#2C3E50', 'font_color': 'white'})
-                fmt_header = wb.add_format({'bold': True, 'bg_color': '#EAEDED', 'border': 1, 'align': 'center'})
+                fmt_semaine = wb.add_format({'bold': True, 'bg_color': '#D5DBDB', 'border': 1, 'align': 'center'})
+                fmt_jour = wb.add_format({'bold': True, 'bg_color': '#EAEDED', 'border': 1, 'align': 'center'})
+                
                 fmt_m = wb.add_format({'bg_color': '#E0F2F1', 'font_color': '#00695C', 'align': 'center', 'border': 1})
                 fmt_a = wb.add_format({'bg_color': '#FFF3E0', 'font_color': '#E65100', 'align': 'center', 'border': 1})
                 fmt_c = wb.add_format({'bg_color': '#FFEBEE', 'font_color': '#B71C1C', 'align': 'center', 'border': 1})
@@ -272,16 +259,29 @@ if st.button("🚀 GÉNÉRER LA TRAME DE ROULEMENT", type="primary", use_contain
                 ws.set_default_row(22)
                 ws.set_row(0, 35) 
                 ws.set_column('A:A', 25) 
-                ws.set_column(1, jours_cycle, 13) 
+                ws.set_column(1, jours_cycle, 8) 
                 ws.set_column(jours_cycle + 1, jours_cycle + 1, 45) 
-                ws.freeze_panes(2, 1) 
                 
-                ws.merge_range(0, 0, 0, jours_cycle + 1, f"TRAME DE ROULEMENT CYCLIQUE - BASE {date_debut.strftime('%d/%m/%Y')}", fmt_titre)
+                # Figer les 3 premières lignes et la 1ère colonne
+                ws.freeze_panes(3, 1) 
                 
-                ws.write(1, 0, "Employés", fmt_header)
-                for i, col_name in enumerate(df_final.columns):
-                    ws.write(1, i + 1, col_name, fmt_header)
+                # LIGNE 0 : Titre
+                ws.merge_range(0, 0, 0, jours_cycle + 1, f"TRAME DE ROULEMENT CYCLIQUE - EHPAD", fmt_titre)
                 
+                # LIGNE 1 : Semaines (S1, S2...)
+                ws.write(1, 0, "", fmt_semaine)
+                for w in range(nb_semaines):
+                    ws.merge_range(1, (w*7)+1, 1, (w*7)+7, f"SEMAINE {w+1}", fmt_semaine)
+                ws.write(1, jours_cycle + 1, "", fmt_semaine)
+                
+                # LIGNE 2 : Jours (L, M, M...)
+                ws.write(2, 0, "Employés", fmt_jour)
+                lettres_jours = ["L", "M", "M", "J", "V", "S", "D"]
+                for c_idx in range(jours_cycle):
+                    ws.write(2, c_idx + 1, lettres_jours[c_idx % 7], fmt_jour)
+                ws.write(2, jours_cycle + 1, "AUDIT DE TRAME", fmt_jour)
+                
+                # LIGNE 3+ : Données
                 for r_idx in range(len(noms_utilises)):
                     est_remplacant = "REMPLAÇANT" in noms_utilises[r_idx]
                     for c_idx in range(jours_cycle):
@@ -292,12 +292,12 @@ if st.button("🚀 GÉNÉRER LA TRAME DE ROULEMENT", type="primary", use_contain
                         elif val == 'C': format_cible = fmt_c
                         elif c_idx % 7 >= 5: format_cible = fmt_we
                         else: format_cible = fmt_repos
-                        ws.write(r_idx + 2, c_idx + 1, val, format_cible)
+                        ws.write(r_idx + 3, c_idx + 1, val, format_cible)
                         
-                    ws.write(r_idx + 2, jours_cycle + 1, df_final.iloc[r_idx, jours_cycle], fmt_audit)
+                    ws.write(r_idx + 3, jours_cycle + 1, audit_data[r_idx], fmt_audit)
             
-            st.success("✅ Trame de roulement générée ! La boucle temporelle est respectée.")
-            st.download_button("📥 TÉLÉCHARGER LE ROULEMENT", buffer.getvalue(), f"Trame_Roulement_EHPAD.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.success("✅ Trame générée ! Le document ne comporte plus de dates, juste S1, S2 et les jours L,M,M...")
+            st.download_button("📥 TÉLÉCHARGER LA MATRICE (EXCEL)", buffer.getvalue(), f"Matrice_Roulement_EHPAD.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         else:
-            st.error("❌ Impossible de générer la trame. Vérifiez les absences (un roulement se génère idéalement SANS absences).")
+            st.error("❌ Impossible de générer la trame. Vérifiez que rien ne bloque l'équilibre strict des postes.")
