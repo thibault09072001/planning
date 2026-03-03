@@ -44,12 +44,12 @@ with st.sidebar:
         st.stop()
         
     st.markdown("---")
-    st.caption("🔒 Moteur de résolution v9.1 (Corrigé)")
-    st.caption("✓ Contrats stricts (20j/16j)\n✓ Max 4j consécutifs\n✓ 9 Titulaires / 2 Remplaçants WE\n✓ Zéro remplaçant en Semaine\n✓ Coupés : 16x (1/1) + 2x (2/0)")
+    st.caption("🔒 Moteur de résolution v10.0 (Trame Cyclique)")
+    st.caption("✓ Roulement Infini (Sem. 4 boucle sur Sem. 1)\n✓ Contrats stricts (20j/16j)\n✓ Max 4j consécutifs strict\n✓ Zéro remplaçant en Semaine\n✓ Coupés : 16x (1/1) + 2x (2/0)")
 
 # --- 3. ESPACE CENTRAL (TABLEAU DE BORD) ---
-st.title("Génération du Planning Opérationnel")
-st.markdown("Veuillez vérifier les absences et les quotités de travail avant de lancer le calcul.")
+st.title("Génération de la Trame de Roulement")
+st.markdown("💡 *Astuce : Pour générer le roulement de base permanent de l'établissement, laissez les absences vides.*")
 
 col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
 with col_kpi1:
@@ -93,7 +93,7 @@ def extraire_indices_absences(texte, date_ref, total_jours):
 st.markdown("<br>", unsafe_allow_html=True)
 
 # --- 4. MOTEUR DE RÉSOLUTION ---
-if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_container_width=True):
+if st.button("🚀 GÉNÉRER LA TRAME DE ROULEMENT", type="primary", use_container_width=True):
     
     df_equipe['Contrat (%)'] = pd.to_numeric(df_equipe['Contrat (%)'], errors='coerce')
     df_equipe = df_equipe.dropna(subset=['Nom', 'Contrat (%)'])
@@ -106,7 +106,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
     nb_titulaires = len(noms_titulaires)
     total_effectif = len(noms_complets)
     
-    with st.spinner("Analyse de l'équité des horaires et génération (environ 45-60 secondes)..."):
+    with st.spinner("Génération du roulement cyclique (boucle temporelle activée)..."):
         jours_cycle = nb_semaines * 7
         postes = ['M', 'A', 'C']
         model = cp_model.CpModel()
@@ -131,20 +131,23 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             # Contrat au jour près
             model.Add(sum(x[(e, d, p)] for d in range(jours_cycle) for p in postes) == cible_jours)
             
+            # Un seul poste par jour
             for d in range(jours_cycle): model.AddAtMostOne(x[(e, d, p)] for p in postes)
-            for d in range(jours_cycle - 1): model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
             
-            # 🛑 Max 4j consécutifs STRICT 
-            for d in range(jours_cycle - 4): 
-                model.Add(sum(x[(e, d+i, p)] for i in range(5) for p in postes) <= 4)
+            # 🛑 1. REPOS CIRCULAIRE : Pas de A suivi de M (y compris Dimanche Sem 4 -> Lundi Sem 1)
+            for d in range(jours_cycle): 
+                jour_suivant = (d + 1) % jours_cycle # Le Modulo (%) ramène le jour 28 au jour 0
+                model.AddImplication(x[(e, d, 'A')], x[(e, jour_suivant, 'M')].Not())
             
-            # 🛑 RÉPARTITION STRICTE ET DÉFINITIVE DES HORAIRES COUPÉS ('C')
+            # 🛑 2. MAX 4 JOURS CIRCULAIRE (Le roulement ne casse jamais les repos)
+            for d in range(jours_cycle): 
+                model.Add(sum(x[(e, (d+i) % jours_cycle, p)] for i in range(5) for p in postes) <= 4)
+            
+            # Coupés
             jours_semaine = [d for d in range(jours_cycle) if d % 7 < 5]
             jours_we = [d for d in range(jours_cycle) if d % 7 >= 5]
-            
             c_sem_var = sum(x[(e, d, 'C')] for d in jours_semaine)
             c_we_var = sum(x[(e, d, 'C')] for d in jours_we)
-            
             est_special = model.NewBoolVar(f'special_c_{e}')
             groupe_special_coupures.append(est_special)
             
@@ -152,25 +155,25 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                 model.Add(c_sem_var == (1 * mult_cycle) + est_special)
                 model.Add(c_we_var == (1 * mult_cycle) - est_special)
             
+            # Gestion des Week-ends
             indicateurs_we = []
             for w in range(nb_semaines):
                 sat, sun = w * 7 + 5, w * 7 + 6
                 actif_we = model.NewBoolVar(f'actif_we_{e}_{w}')
-                
-                # LA CORRECTION EST ICI : On force à travailler les 2 jours ou aucun, 
-                # MAIS plus obligatoirement sur le MÊME poste !
                 model.Add(sum(x[(e, sat, p)] for p in postes) == sum(x[(e, sun, p)] for p in postes))
-                
                 model.AddMaxEquality(actif_we, [x[(e, sat, p)] for p in postes])
                 indicateurs_we.append(actif_we)
                 periode = range(w * 7, w * 7 + 7)
                 model.Add(sum(x[(e, d, p)] for d in periode for p in postes) <= 4 + (2 * actif_we))
 
-            for w in range(nb_semaines - 1): model.Add(indicateurs_we[w] + indicateurs_we[w+1] <= 1)
+            # 🛑 3. WEEK-ENDS CIRCULAIRES : Pas de WE Sem 4 + WE Sem 1
+            for w in range(nb_semaines): 
+                we_suivant = (w + 1) % nb_semaines # Boucle le dernier week-end sur le premier
+                model.Add(indicateurs_we[w] + indicateurs_we[we_suivant] <= 1)
+                
             for d in indices_abs:
                 for p in postes: model.Add(x[(e, d, p)] == 0)
 
-        # 🛑 On force exactement 2 personnes à être "Spéciales" (2 Sem / 0 WE)
         if mult_cycle >= 1:
             model.Add(sum(groupe_special_coupures) == 2 * mult_cycle)
 
@@ -180,13 +183,9 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             for d in range(jours_cycle):
                 model.AddAtMostOne(x[(e, d, p)] for p in postes)
                 if d % 7 < 5:
-                    for p in postes: model.Add(x[(e, d, p)] == 0) # Zéro en semaine
-                
-                # Les remplaçants non plus ne sont plus obligés de faire la même lettre Samedi et Dimanche
+                    for p in postes: model.Add(x[(e, d, p)] == 0)
                 if d % 7 == 5: 
                     model.Add(sum(x[(e, d, p)] for p in postes) == sum(x[(e, d+1, p)] for p in postes))
-                    
-            # Interdiction mathématique pour les remplaçants de faire des coupés (pour soulager le cerveau de l'IA)
             for d in range(jours_cycle):
                 model.Add(x[(e, d, 'C')] == 0)
 
@@ -194,7 +193,6 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
         for d in range(jours_cycle):
             is_we = (d % 7 >= 5)
             m_target, a_target, c_target = (6, 3, 2) if is_we else (8, 4, 1)
-            
             model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) >= m_target) 
             model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) == a_target)
             model.Add(sum(x[(e, d, 'C')] for e in range(total_effectif)) == c_target)
@@ -203,7 +201,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires) for p in postes) == 9)
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for p in postes) == 2)
 
-        # --- OPTIMISATION GLOBALE ---
+        # --- OPTIMISATION ---
         poids_titulaire = sum(x[(e, d, p)] for e in range(nb_titulaires) for d in range(jours_cycle) for p in postes)
         poids_remplacant = sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for d in range(jours_cycle) for p in postes)
         model.Maximize(poids_titulaire * 10 - poids_remplacant)
@@ -234,8 +232,10 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                         ligne_planning.append(valeur)
                     
                     enchainements_am = 0
-                    for d in range(jours_cycle - 1):
-                        if ligne_planning[d] == 'A' and ligne_planning[d+1] == 'M':
+                    # Vérification circulaire pour l'Audit A->M
+                    for d in range(jours_cycle):
+                        jour_suivant = (d + 1) % jours_cycle
+                        if ligne_planning[d] == 'A' and ligne_planning[jour_suivant] == 'M':
                             enchainements_am += 1
                             
                     resultats.append(ligne_planning)
@@ -276,7 +276,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                 ws.set_column(jours_cycle + 1, jours_cycle + 1, 45) 
                 ws.freeze_panes(2, 1) 
                 
-                ws.merge_range(0, 0, 0, jours_cycle + 1, f"PLANNING OPÉRATIONNEL - CYCLE DÉBUTANT LE {date_debut.strftime('%d/%m/%Y')}", fmt_titre)
+                ws.merge_range(0, 0, 0, jours_cycle + 1, f"TRAME DE ROULEMENT CYCLIQUE - BASE {date_debut.strftime('%d/%m/%Y')}", fmt_titre)
                 
                 ws.write(1, 0, "Employés", fmt_header)
                 for i, col_name in enumerate(df_final.columns):
@@ -296,8 +296,8 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                         
                     ws.write(r_idx + 2, jours_cycle + 1, df_final.iloc[r_idx, jours_cycle], fmt_audit)
             
-            st.success("✅ Fichier Excel généré avec succès !")
-            st.download_button("📥 TÉLÉCHARGER LE PLANNING", buffer.getvalue(), f"Planning_Direction_{date_debut.strftime('%d-%m-%Y')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.success("✅ Trame de roulement générée ! La boucle temporelle est respectée.")
+            st.download_button("📥 TÉLÉCHARGER LE ROULEMENT", buffer.getvalue(), f"Trame_Roulement_EHPAD.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         else:
-            st.error("❌ Impossible de trouver une solution mathématique stricte. S'il y a des absences déclarées, vérifiez qu'elles ne bloquent pas l'obligation pour chaque salarié de faire ses 1 ou 2 coupés.")
+            st.error("❌ Impossible de générer la trame. Vérifiez les absences (un roulement se génère idéalement SANS absences).")
