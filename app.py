@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # --- 1. CONFIGURATION DE L'INTERFACE ---
 st.set_page_config(page_title="Optimisation Planning EHPAD", page_icon="🏥", layout="wide")
 st.title("🏥 Système d'Ajustement des Ressources Humaines")
-st.markdown("Contraintes appliquées : Max 4 jours consécutifs, 9 titulaires + 2 remplaçants par week-end.")
+st.markdown("Contraintes : Respect strict des contrats (20j/16j), 9 Titulaires + 2 Remplaçants le WE.")
 
 # --- 2. PARAMÈTRES D'ENTRÉE ---
 col1, col2 = st.columns([1, 3])
@@ -16,15 +16,12 @@ with col1:
     st.subheader("Paramètres de session")
     nb_semaines = st.number_input("Durée du cycle (semaines) :", min_value=2, max_value=12, value=4)
     
-    # Calcul du lundi de la semaine en cours par défaut
     aujourdhui = datetime.today()
     lundi_par_defaut = aujourdhui - timedelta(days=aujourdhui.weekday())
-    
     date_debut = st.date_input("Date d'effet (Lundi IMPÉRATIF) :", value=lundi_par_defaut)
     
-    # SÉCURITÉ : Blocage si la date n'est pas un Lundi
     if date_debut.weekday() != 0:
-        st.error("🛑 Erreur : La date de début doit obligatoirement être un Lundi pour garantir l'alignement des week-ends.")
+        st.error("🛑 Erreur : La date de début doit obligatoirement être un Lundi.")
         st.stop()
 
 with col2:
@@ -38,7 +35,7 @@ with col2:
     })
     df_equipe = st.data_editor(data_base, num_rows="dynamic", use_container_width=True)
 
-# --- UTILITAIRE DE TRAITEMENT DES DATES ---
+# --- FONCTION DATES ---
 def extraire_indices_absences(texte, date_ref, total_jours):
     indices = []
     if not texte or pd.isna(texte): return indices
@@ -69,70 +66,70 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
     valeurs_contrats = df_equipe["Contrat (%)"].tolist()
     absences_declarees = df_equipe["Congés / Absences"].tolist()
     
-    # EXACTEMENT 2 REMPLAÇANTS POUR ÉVITER LES LIGNES VIDES
     noms_complets = noms_titulaires + ["REMPLAÇANT 1", "REMPLAÇANT 2"]
     nb_titulaires = len(noms_titulaires)
     total_effectif = len(noms_complets)
     
-    with st.spinner("Analyse des contraintes et répartition des effectifs..."):
+    with st.spinner("Analyse des contrats et intégration stricte des quotas..."):
         jours_cycle = nb_semaines * 7
         postes = ['M', 'A', 'C']
         model = cp_model.CpModel()
-        
         x = {}
         for e in range(total_effectif):
             for d in range(jours_cycle):
                 for p in postes:
                     x[(e, d, p)] = model.NewBoolVar(f'staff_{e}_{d}_{p}')
         
-        # --- CONTRAINTES RELATIVES AUX TITULAIRES ---
+        cibles_travail = [] # Pour stocker l'objectif de chaque salarié pour l'Audit
+        
+        # --- CONTRAINTES TITULAIRES ---
         for e in range(nb_titulaires):
+            indices_abs = extraire_indices_absences(absences_declarees[e], date_debut, jours_cycle)
+            
+            # CALCUL STRICT DU CONTRAT (Ex: 20 jours pour 100%)
             charge_max = int((valeurs_contrats[e] / 100) * 5 * nb_semaines)
-            model.Add(sum(x[(e, d, p)] for d in range(jours_cycle) for p in postes) <= charge_max)
             
-            for d in range(jours_cycle):
-                model.AddAtMostOne(x[(e, d, p)] for p in postes)
+            # DÉDUCTION DES ABSENCES (1 jour d'absence réduit la cible)
+            jours_a_deduire = int(round(len(indices_abs) * (5.0 / 7.0) * (valeurs_contrats[e] / 100.0)))
+            cible_jours = charge_max - jours_a_deduire
+            cibles_travail.append(cible_jours)
             
-            for d in range(jours_cycle - 1):
-                model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
+            # 🛑 RÈGLE D'OR : ÉGALITÉ STRICTE (Le salarié DOIT faire ses jours)
+            model.Add(sum(x[(e, d, p)] for d in range(jours_cycle) for p in postes) == cible_jours)
             
-            for d in range(jours_cycle - 4):
-                model.Add(sum(x[(e, d+i, p)] for i in range(5) for p in postes) <= 4)
+            for d in range(jours_cycle): model.AddAtMostOne(x[(e, d, p)] for p in postes)
+            for d in range(jours_cycle - 1): model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
+            for d in range(jours_cycle - 4): model.Add(sum(x[(e, d+i, p)] for i in range(5) for p in postes) <= 4)
             
             indicateurs_we = []
             for w in range(nb_semaines):
                 sat, sun = w * 7 + 5, w * 7 + 6
                 actif_we = model.NewBoolVar(f'actif_we_{e}_{w}')
-                for p in postes:
-                    model.Add(x[(e, sat, p)] == x[(e, sun, p)]) 
-                
+                for p in postes: model.Add(x[(e, sat, p)] == x[(e, sun, p)]) 
                 model.AddMaxEquality(actif_we, [x[(e, sat, p)] for p in postes])
                 indicateurs_we.append(actif_we)
-                
                 periode = range(w * 7, w * 7 + 7)
-                charge_hebdo = sum(x[(e, d, p)] for d in periode for p in postes)
-                model.Add(charge_hebdo <= 4 + (2 * actif_we))
+                model.Add(sum(x[(e, d, p)] for d in periode for p in postes) <= 4 + (2 * actif_we))
 
-            for w in range(nb_semaines - 1):
-                model.Add(indicateurs_we[w] + indicateurs_we[w+1] <= 1)
-
-            indices_abs = extraire_indices_absences(absences_declarees[e], date_debut, jours_cycle)
+            for w in range(nb_semaines - 1): model.Add(indicateurs_we[w] + indicateurs_we[w+1] <= 1)
             for d in indices_abs:
                 for p in postes: model.Add(x[(e, d, p)] == 0)
 
-        # --- CONTRAINTES RELATIVES AUX REMPLAÇANTS ---
+        # --- CONTRAINTES REMPLAÇANTS ---
         for e in range(nb_titulaires, total_effectif):
+            cibles_travail.append("Remp.") # Pas de cible fixe pour eux
             for d in range(jours_cycle):
                 model.AddAtMostOne(x[(e, d, p)] for p in postes)
                 if d % 7 == 5: 
-                    for p in postes:
-                        model.Add(x[(e, d, p)] == x[(e, d+1, p)])
+                    for p in postes: model.Add(x[(e, d, p)] == x[(e, d+1, p)])
 
         # --- QUOTAS DE SERVICE ---
         for d in range(jours_cycle):
             is_we = (d % 7 >= 5)
             m_target, a_target, c_target = (6, 3, 2) if is_we else (8, 4, 1)
-            model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) == m_target)
+            
+            # SOUPAPE : >= pour le Matin, afin d'absorber les heures des titulaires
+            model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) >= m_target) 
             model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) == a_target)
             model.Add(sum(x[(e, d, 'C')] for e in range(total_effectif)) == c_target)
             
@@ -150,7 +147,7 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
         statut = solver.Solve(model)
 
         if statut in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("Planning généré. Les lignes d'audit ont été ajoutées.")
+            st.success("✅ Planning validé. Contrats respectés au jour près.")
             
             resultats, noms_utilises, audit_data = [], [], []
             for e in range(total_effectif):
@@ -159,7 +156,6 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
                     ligne_planning = []
                     jours_travailles = 0
                     
-                    # Construction de la ligne de planning
                     for d in range(jours_cycle):
                         valeur = "Repos"
                         for p in postes:
@@ -168,21 +164,26 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
                                 jours_travailles += 1
                         ligne_planning.append(valeur)
                     
-                    # Audit : Calcul des enchaînements A -> M
                     enchainements_am = 0
                     for d in range(jours_cycle - 1):
                         if ligne_planning[d] == 'A' and ligne_planning[d+1] == 'M':
                             enchainements_am += 1
                             
-                    # Stockage des données
                     resultats.append(ligne_planning)
                     noms_utilises.append(noms_complets[e])
-                    audit_data.append(f"{jours_travailles}j | {enchainements_am} A->M")
+                    
+                    # FORMATAGE DE L'AUDIT
+                    if e < nb_titulaires:
+                        audit_txt = f"{jours_travailles}j / {cibles_travail[e]}j | {enchainements_am} A->M"
+                        if jours_travailles != cibles_travail[e]: audit_txt = "❌ ERREUR CONTRAT"
+                    else:
+                        audit_txt = f"{jours_travailles}j total | {enchainements_am} A->M"
+                    
+                    audit_data.append(audit_txt)
 
-            # Création du DataFrame
             colonnes = [(date_debut + timedelta(days=i)).strftime('%a %d/%m') for i in range(jours_cycle)]
             df_final = pd.DataFrame(resultats, columns=colonnes, index=noms_utilises)
-            df_final['AUDIT'] = audit_data # Ajout de la colonne d'audit
+            df_final['AUDIT CONTRAT'] = audit_data 
             
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -197,14 +198,13 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
                 fmt_audit = wb.add_format({'font_color': '#2C3E50', 'bold': True, 'align': 'center', 'border': 1, 'bg_color': '#EAEDED'})
                 
                 ws.set_column('A:A', 30)
-                ws.set_column(jours_cycle + 1, jours_cycle + 1, 15) # Largeur pour la colonne AUDIT
+                ws.set_column(jours_cycle + 1, jours_cycle + 1, 18) 
                 
                 for r_idx in range(len(noms_utilises)):
                     est_remplacant = "REMPLAÇANT" in noms_utilises[r_idx]
                     for c_idx in range(jours_cycle):
                         val = df_final.iloc[r_idx, c_idx]
-                        if est_remplacant and val != "Repos":
-                            format_cible = fmt_remp
+                        if est_remplacant and val != "Repos": format_cible = fmt_remp
                         elif val == 'M': format_cible = fmt_m
                         elif val == 'A': format_cible = fmt_a
                         elif val == 'C': format_cible = fmt_c
@@ -212,9 +212,8 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
                         else: format_cible = None
                         ws.write(r_idx + 1, c_idx + 1, val, format_cible)
                         
-                    # Écriture de la cellule d'audit avec son format
                     ws.write(r_idx + 1, jours_cycle + 1, df_final.iloc[r_idx, jours_cycle], fmt_audit)
             
             st.download_button("📥 EXTRAIRE LE PLANNING (EXCEL)", buffer.getvalue(), f"Planning_RH_{date_debut.strftime('%d-%m-%Y')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.error("Aucune solution compatible. Vérifiez les chevauchements d'absences.")
+            st.error("❌ Impossible de trouver une solution. Vérifiez que les absences ne bloquent pas les quotas.")
