@@ -15,8 +15,17 @@ col1, col2 = st.columns([1, 3])
 with col1:
     st.subheader("Paramètres de session")
     nb_semaines = st.number_input("Durée du cycle (semaines) :", min_value=2, max_value=12, value=4)
-    date_debut = st.date_input("Date d'effet (Lundi) :", value=datetime.today())
-
+    
+    # Calcul du lundi de la semaine en cours pour le mettre par défaut
+    aujourdhui = datetime.today()
+    lundi_par_defaut = aujourdhui - timedelta(days=aujourdhui.weekday())
+    
+    date_debut = st.date_input("Date d'effet (Lundi IMPÉRATIF) :", value=lundi_par_defaut)
+    
+    # 🛑 SÉCURITÉ : On bloque tout si ce n'est pas un Lundi !
+    if date_debut.weekday() != 0:
+        st.error("🛑 Erreur : La date de début doit obligatoirement être un Lundi pour que les week-ends tombent le Samedi et Dimanche.")
+        st.stop() # Le programme s'arrête net ici
 with col2:
     st.subheader("Registre du Personnel & Absences")
     st.caption("Format des absences : '01/05' ou '01/05-05/05'. Les colonnes vides sont ignorées.")
