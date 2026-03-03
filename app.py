@@ -33,7 +33,7 @@ with st.sidebar:
     st.title("Configuration")
     st.markdown("---")
     
-    nb_semaines = st.number_input("⏱️ Durée du cycle (semaines)", min_value=2, max_value=12, value=4)
+    nb_semaines = st.number_input("⏱️ Durée du cycle (semaines)", min_value=4, max_value=12, value=4, step=4)
     
     aujourdhui = datetime.today()
     lundi_par_defaut = aujourdhui - timedelta(days=aujourdhui.weekday())
@@ -44,8 +44,8 @@ with st.sidebar:
         st.stop()
         
     st.markdown("---")
-    st.caption("🔒 Moteur de résolution v8.1 (Strict)")
-    st.caption("✓ Contrats stricts (20j/16j)\n✓ Max 4j consécutifs\n✓ 9 Titulaires / 2 Remplaçants WE\n✓ Zéro remplaçant en semaine\n✓ Coupés : Exactement 16x(1Sem/1WE) et 2x(2Sem/0WE)")
+    st.caption("🔒 Moteur de résolution v9.0 (Ultra Strict)")
+    st.caption("✓ Contrats stricts (20j/16j)\n✓ Max 4j consécutifs (Rétabli)\n✓ 9 Titulaires / 2 Remplaçants WE\n✓ Zéro remplaçant en semaine\n✓ Coupés : 16x (1 Sem/1 WE) + 2x (2 Sem/0 WE)")
 
 # --- 3. ESPACE CENTRAL (TABLEAU DE BORD) ---
 st.title("Génération du Planning Opérationnel")
@@ -106,7 +106,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
     nb_titulaires = len(noms_titulaires)
     total_effectif = len(noms_complets)
     
-    with st.spinner("Analyse des contrats et génération du planning en cours (environ 30-60 secondes)..."):
+    with st.spinner("Analyse de l'équité des horaires et génération (environ 45-60 secondes)..."):
         jours_cycle = nb_semaines * 7
         postes = ['M', 'A', 'C']
         model = cp_model.CpModel()
@@ -117,7 +117,8 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                     x[(e, d, p)] = model.NewBoolVar(f'staff_{e}_{d}_{p}')
         
         cibles_travail = [] 
-        groupe_special_coupures = [] # Pour stocker la variable des 2 salariés spéciaux
+        groupe_special_coupures = []
+        mult_cycle = nb_semaines // 4 # Multiplicateur (1 pour 4 semaines, 2 pour 8 semaines...)
         
         # --- CONTRAINTES TITULAIRES ---
         for e in range(nb_titulaires):
@@ -127,28 +128,30 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             cible_jours = charge_max - jours_a_deduire
             cibles_travail.append(cible_jours)
             
+            # Contrat au jour près
             model.Add(sum(x[(e, d, p)] for d in range(jours_cycle) for p in postes) == cible_jours)
+            
             for d in range(jours_cycle): model.AddAtMostOne(x[(e, d, p)] for p in postes)
             for d in range(jours_cycle - 1): model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
-            for d in range(jours_cycle - 4): model.Add(sum(x[(e, d+i, p)] for i in range(5) for p in postes) <= 4)
             
-            # 🛑 RÉPARTITION STRICTE DES HORAIRES COUPÉS ('C')
+            # 🛑 Règle des 4 jours consécutifs max (RÉTABLIE)
+            for d in range(jours_cycle - 4): 
+                model.Add(sum(x[(e, d+i, p)] for i in range(5) for p in postes) <= 4)
+            
+            # 🛑 RÉPARTITION STRICTE ET DÉFINITIVE DES HORAIRES COUPÉS ('C')
             jours_semaine = [d for d in range(jours_cycle) if d % 7 < 5]
             jours_we = [d for d in range(jours_cycle) if d % 7 >= 5]
             
             c_sem_var = sum(x[(e, d, 'C')] for d in jours_semaine)
             c_we_var = sum(x[(e, d, 'C')] for d in jours_we)
             
-            # Booléen : Ce salarié est-il un des 2 "Spéciaux" (2 en sem / 0 le WE) ?
             est_special = model.NewBoolVar(f'special_c_{e}')
             groupe_special_coupures.append(est_special)
             
-            base_c = int(nb_semaines / 4) # Vaut 1 pour un cycle de 4 semaines
-            
-            # Si est_special == 1 -> c_sem = 1+1=2, c_we = 1-1=0
-            # Si est_special == 0 -> c_sem = 1+0=1, c_we = 1-0=1
-            model.Add(c_sem_var == base_c + est_special)
-            model.Add(c_we_var == base_c - est_special)
+            # Égalité Stricte : L'IA n'a plus le choix.
+            if mult_cycle >= 1:
+                model.Add(c_sem_var == (1 * mult_cycle) + est_special)
+                model.Add(c_we_var == (1 * mult_cycle) - est_special)
             
             indicateurs_we = []
             for w in range(nb_semaines):
@@ -164,20 +167,17 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             for d in indices_abs:
                 for p in postes: model.Add(x[(e, d, p)] == 0)
 
-        # 🛑 ON FORCE L'ÉQUILIBRE : EXACTEMENT 2 SALARIÉS SPÉCIAUX (sur 4 semaines)
-        nb_speciaux_requis = 2 * int(nb_semaines / 4)
-        model.Add(sum(groupe_special_coupures) == nb_speciaux_requis)
+        # 🛑 On force exactement 2 personnes (par bloc de 4 semaines) à être "Spéciales" (2 Sem / 0 WE)
+        if mult_cycle >= 1:
+            model.Add(sum(groupe_special_coupures) == 2 * mult_cycle)
 
         # --- CONTRAINTES REMPLAÇANTS ---
         for e in range(nb_titulaires, total_effectif):
             cibles_travail.append("Remp.") 
             for d in range(jours_cycle):
                 model.AddAtMostOne(x[(e, d, p)] for p in postes)
-                
-                # Zéro remplaçant en semaine
                 if d % 7 < 5:
-                    for p in postes: model.Add(x[(e, d, p)] == 0)
-                
+                    for p in postes: model.Add(x[(e, d, p)] == 0) # Zéro en semaine
                 if d % 7 == 5: 
                     for p in postes: model.Add(x[(e, d, p)] == x[(e, d+1, p)])
 
@@ -194,13 +194,13 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires) for p in postes) == 9)
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for p in postes) == 2)
 
-        # --- OPTIMISATION ---
+        # --- OPTIMISATION GLOBALE ---
         poids_titulaire = sum(x[(e, d, p)] for e in range(nb_titulaires) for d in range(jours_cycle) for p in postes)
         poids_remplacant = sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for d in range(jours_cycle) for p in postes)
         model.Maximize(poids_titulaire * 10 - poids_remplacant)
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 60.0
+        solver.parameters.max_time_in_seconds = 75.0 # Un peu plus de temps pour l'équation exacte
         statut = solver.Solve(model)
 
         if statut in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
@@ -233,8 +233,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                     noms_utilises.append(noms_complets[e])
                     
                     if e < nb_titulaires:
-                        # Si le salarié est un des 2 "spéciaux", on l'indique dans l'audit avec une étoile 🌟
-                        etoile = "🌟 " if c_semaine == 2 else ""
+                        etoile = "🌟 " if c_semaine > c_we else "✅ "
                         audit_txt = f"{etoile}{jours_travailles}j/{cibles_travail[e]}j | {c_semaine}C Sem, {c_we}C WE | {enchainements_am} A->M"
                         if jours_travailles != cibles_travail[e]: audit_txt = "❌ ERREUR CONTRAT"
                     else:
@@ -246,7 +245,6 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             df_final = pd.DataFrame(resultats, columns=colonnes, index=noms_utilises)
             df_final['AUDIT RH'] = audit_data 
             
-            # --- EXPORT EXCEL PROFESSIONNEL ---
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                 df_final.to_excel(writer, sheet_name='Planning', startrow=1)
@@ -260,7 +258,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                 fmt_remp = wb.add_format({'bg_color': '#34495E', 'font_color': '#FFFFFF', 'bold': True, 'align': 'center', 'border': 1})
                 fmt_we = wb.add_format({'bg_color': '#F8F9F9', 'border': 1})
                 fmt_repos = wb.add_format({'font_color': '#BDC3C7', 'align': 'center', 'border': 1})
-                fmt_audit = wb.add_format({'font_color': '#34495E', 'bold': True, 'align': 'left', 'border': 1, 'bg_color': '#F4F6F6'}) # Aligné à gauche pour voir l'étoile
+                fmt_audit = wb.add_format({'font_color': '#34495E', 'bold': True, 'align': 'left', 'border': 1, 'bg_color': '#F4F6F6'}) 
                 
                 ws.set_default_row(22)
                 ws.set_row(0, 35) 
@@ -293,4 +291,4 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             st.download_button("📥 TÉLÉCHARGER LE PLANNING", buffer.getvalue(), f"Planning_Direction_{date_debut.strftime('%d-%m-%Y')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         else:
-            st.error("❌ Impossible de trouver une solution mathématique. Note : S'il y a trop d'absences, le système ne peut pas forcer les coupés comme demandé sans violer les contrats.")
+            st.error("❌ Impossible de trouver une solution mathématique stricte. S'il y a des absences déclarées, vérifiez qu'elles ne bloquent pas l'obligation pour chaque salarié de faire ses 1 ou 2 coupés.")
