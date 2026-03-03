@@ -150,22 +150,39 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
         statut = solver.Solve(model)
 
         if statut in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("Planning généré. Les remplaçants couvrent l'intégralité de leurs créneaux.")
+            st.success("Planning généré. Les lignes d'audit ont été ajoutées.")
             
-            resultats, noms_utilises = [], []
+            resultats, noms_utilises, audit_data = [], [], []
             for e in range(total_effectif):
                 total_activite = sum(solver.Value(x[(e, d, p)]) for d in range(jours_cycle) for p in postes)
                 if e < nb_titulaires or total_activite > 0:
                     ligne_planning = []
+                    jours_travailles = 0
+                    
+                    # Construction de la ligne de planning
                     for d in range(jours_cycle):
                         valeur = "Repos"
                         for p in postes:
-                            if solver.Value(x[(e, d, p)]) == 1: valeur = p
+                            if solver.Value(x[(e, d, p)]) == 1: 
+                                valeur = p
+                                jours_travailles += 1
                         ligne_planning.append(valeur)
+                    
+                    # Audit : Calcul des enchaînements A -> M
+                    enchainements_am = 0
+                    for d in range(jours_cycle - 1):
+                        if ligne_planning[d] == 'A' and ligne_planning[d+1] == 'M':
+                            enchainements_am += 1
+                            
+                    # Stockage des données
                     resultats.append(ligne_planning)
                     noms_utilises.append(noms_complets[e])
+                    audit_data.append(f"{jours_travailles}j | {enchainements_am} A->M")
 
-            df_final = pd.DataFrame(resultats, columns=[(date_debut + timedelta(days=i)).strftime('%a %d/%m') for i in range(jours_cycle)], index=noms_utilises)
+            # Création du DataFrame
+            colonnes = [(date_debut + timedelta(days=i)).strftime('%a %d/%m') for i in range(jours_cycle)]
+            df_final = pd.DataFrame(resultats, columns=colonnes, index=noms_utilises)
+            df_final['AUDIT'] = audit_data # Ajout de la colonne d'audit
             
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -177,8 +194,11 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
                 fmt_c = wb.add_format({'bg_color': '#FADBD8', 'align': 'center', 'border': 1})
                 fmt_remp = wb.add_format({'bg_color': '#E67E22', 'font_color': '#FFFFFF', 'bold': True, 'border': 1})
                 fmt_we = wb.add_format({'bg_color': '#F2F4F4', 'border': 1})
+                fmt_audit = wb.add_format({'font_color': '#2C3E50', 'bold': True, 'align': 'center', 'border': 1, 'bg_color': '#EAEDED'})
                 
                 ws.set_column('A:A', 30)
+                ws.set_column(jours_cycle + 1, jours_cycle + 1, 15) # Largeur pour la colonne AUDIT
+                
                 for r_idx in range(len(noms_utilises)):
                     est_remplacant = "REMPLAÇANT" in noms_utilises[r_idx]
                     for c_idx in range(jours_cycle):
@@ -191,6 +211,9 @@ if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_containe
                         elif c_idx % 7 >= 5: format_cible = fmt_we
                         else: format_cible = None
                         ws.write(r_idx + 1, c_idx + 1, val, format_cible)
+                        
+                    # Écriture de la cellule d'audit avec son format
+                    ws.write(r_idx + 1, jours_cycle + 1, df_final.iloc[r_idx, jours_cycle], fmt_audit)
             
             st.download_button("📥 EXTRAIRE LE PLANNING (EXCEL)", buffer.getvalue(), f"Planning_RH_{date_debut.strftime('%d-%m-%Y')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
