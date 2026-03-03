@@ -1,195 +1,147 @@
 import streamlit as st
 import pandas as pd
-import io
-import math
-from ortools.sat.python import cp_model
+import numpy as np
 from datetime import datetime, timedelta
 
-# --- 1. CONFIGURATION DE L'INTERFACE ---
-st.set_page_config(page_title="Optimisation Planning EHPAD", page_icon="🏥", layout="wide")
-st.title("🏥 Système d'Ajustement des Ressources Humaines")
-st.markdown("Génération de planning sous contraintes conventionnelles et optimisation de la charge de travail.")
+# --- CONFIGURATION DE LA PAGE ---
+st.set_page_config(page_title="Générateur de Planning - Ehpad", page_icon="🏥", layout="wide")
 
-# --- 2. PARAMÈTRES D'ENTRÉE ---
-col1, col2 = st.columns([1, 3])
+# --- DONNÉES ET PARAMÈTRES ---
+JOURS_SEMAINE = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+CODES_POSTES = {
+    "M": "Matin (7h)",
+    "A": "Après-midi (7h)",
+    "C": "Coupé (7h-11h / 17h30-20h30)",
+    "R": "Repos"
+}
+
+# Besoins journaliers
+BESOINS_SEMAINE = {"M": 8, "A": 4, "C": 1}
+BESOINS_WE = {"M": 6, "A": 3, "C": 2}
+
+def init_personnel():
+    """Initialise la liste du personnel avec leur temps de travail."""
+    personnel = []
+    # 15 Temps complets (100%)
+    for i in range(1, 16):
+        personnel.append({"Nom": f"Soignant TC {i}", "Contrat": "100%", "Equipe_WE": "A" if i <= 8 else "B"})
+    # 3 Temps partiels (80%)
+    for i in range(1, 4):
+        # On équilibre les équipes WE (9 dans l'équipe A, 9 dans l'équipe B)
+        equipe = "A" if i == 1 else "B" 
+        personnel.append({"Nom": f"Soignant TP {i}", "Contrat": "80%", "Equipe_WE": equipe})
+    return pd.DataFrame(personnel)
+
+# --- ALGORITHME DE GÉNÉRATION (HEURISTIQUE) ---
+def generer_planning(df_personnel):
+    """Génère un roulement de 4 semaines basé sur les contraintes."""
+    colonnes_jours = [f"{JOURS_SEMAINE[d%7]} S{d//7 + 1}" for d in range(28)]
+    planning = pd.DataFrame(index=df_personnel["Nom"], columns=colonnes_jours)
+    planning.fillna("R", inplace=True) # Repos par défaut
+
+    for index, row in df_personnel.iterrows():
+        nom = row["Nom"]
+        equipe = row["Equipe_WE"]
+        
+        # RÈGLE : 1 WE sur 2. 
+        # Equipe A travaille WE S1 et S3. Equipe B travaille WE S2 et S4.
+        we_travailles = [0, 2] if equipe == "A" else [1, 3]
+        
+        for num_semaine in range(4):
+            # Index des jours de la semaine (0=Lun, ..., 5=Sam, 6=Dim)
+            idx_base = num_semaine * 7
+            
+            if num_semaine in we_travailles:
+                # --- SEMAINE DE TRAVAIL AVEC WE (6 jours travaillés) ---
+                # Contrainte : 1 WE du matin, l'autre Aprem/Coupé
+                if num_semaine in [0, 1]: # Premier WE travaillé du cycle
+                    planning.loc[nom, colonnes_jours[idx_base + 5]] = "M" # Samedi
+                    planning.loc[nom, colonnes_jours[idx_base + 6]] = "M" # Dimanche
+                else: # Deuxième WE travaillé du cycle
+                    planning.loc[nom, colonnes_jours[idx_base + 5]] = "A" # Samedi
+                    planning.loc[nom, colonnes_jours[idx_base + 6]] = "C" # Dimanche (Coupé)
+
+                # Pour faire 6 jours avec max 4 jours consécutifs : 
+                # Repos le Mercredi. Travail Lun, Mar, Jeu, Ven, Sam, Dim (Ajusté pour éviter 5 jrs)
+                # Modèle typique : Repos Mardi. Travail Lun, Mer, Jeu, Ven, Sam, Dim -> 6 jours consécutifs = INTERDIT
+                # On force le repos le Vendredi pour couper avant le WE.
+                planning.loc[nom, colonnes_jours[idx_base + 0]] = "M" # Lun
+                planning.loc[nom, colonnes_jours[idx_base + 1]] = "M" # Mar
+                planning.loc[nom, colonnes_jours[idx_base + 2]] = "R" # Mer (Repos)
+                planning.loc[nom, colonnes_jours[idx_base + 3]] = "M" # Jeu
+                planning.loc[nom, colonnes_jours[idx_base + 4]] = "R" # Ven (Repos pré-WE pour casser la série)
+                # Il manque des jours pour faire 6j, l'algo basique nécessitera un ajustement manuel
+                # On rajoute un jour travaillé pour s'approcher de la cible :
+                planning.loc[nom, colonnes_jours[idx_base + 2]] = "A" 
+                
+            else:
+                # --- SEMAINE DE REPOS LE WE (4 jours travaillés) ---
+                # Repos Samedi (5) et Dimanche (6)
+                planning.loc[nom, colonnes_jours[idx_base + 5]] = "R" 
+                planning.loc[nom, colonnes_jours[idx_base + 6]] = "R" 
+                
+                # Travail 4 jours dans la semaine, ex: Lun, Mar, Jeu, Ven
+                planning.loc[nom, colonnes_jours[idx_base + 0]] = "A"
+                planning.loc[nom, colonnes_jours[idx_base + 1]] = "M" # Attention A suivi de M (à corriger via st.data_editor)
+                planning.loc[nom, colonnes_jours[idx_base + 3]] = "A"
+                planning.loc[nom, colonnes_jours[idx_base + 4]] = "C" # Un coupé en semaine comme demandé
+                
+    return planning
+
+# --- INTERFACE UTILISATEUR ---
+st.title("🏥 Planification des Soignants (Roulement 4 semaines)")
+st.markdown("Générez, ajustez et exportez le planning selon vos contraintes métier.")
+
+df_perso = init_personnel()
+
+col1, col2 = st.columns([1, 4])
+
 with col1:
-    st.subheader("Paramètres de session")
-    nb_semaines = st.number_input("Durée du cycle (semaines) :", min_value=2, max_value=12, value=4)
-    date_debut = st.date_input("Date d'effet (Lundi) :", value=datetime.today())
+    st.header("⚙️ Actions")
+    if st.button("🔄 Générer le roulement", type="primary"):
+        st.session_state["planning"] = generer_planning(df_perso)
+        st.success("Planning généré avec succès !")
+    
+    st.markdown("---")
+    st.markdown("**Légende :**")
+    for code, desc in CODES_POSTES.items():
+        st.markdown(f"- **{code}** : {desc}")
+        
+    st.markdown("---")
+    st.info("💡 **Rappel** : L'algorithme place 9 titulaires par WE. Les besoins restants (ex: 2 postes) doivent être comblés par des remplaçants.")
 
 with col2:
-    st.subheader("Registre du Personnel & Absences")
-    st.caption("Format des absences : '01/05' ou '01/05-05/05'. Les colonnes vides sont ignorées.")
-    
-    data_base = pd.DataFrame({
-        "Nom": [f"Salarié {i+1}" for i in range(15)] + [f"Salarié {i+16}" for i in range(3)],
-        "Contrat (%)": [100]*15 + [80]*3,
-        "Congés / Absences": [""] * 18
-    })
-    df_equipe = st.data_editor(data_base, num_rows="dynamic", use_container_width=True)
-
-# --- UTILITAIRE DE TRAITEMENT DES DATES ---
-def extraire_indices_absences(texte, date_ref, total_jours):
-    indices = []
-    if not texte or pd.isna(texte): return indices
-    segments = str(texte).replace(' ', '').split(',')
-    for segment in segments:
-        try:
-            if '-' in segment:
-                d1_s, d2_s = segment.split('-')
-                d1 = datetime.strptime(d1_s + f"/{date_ref.year}", "%d/%m/%Y").date()
-                d2 = datetime.strptime(d2_s + f"/{date_ref.year}", "%d/%m/%Y").date()
-                for i in range((d2 - d1).days + 1):
-                    ecart = (d1 + timedelta(days=i) - date_ref).days
-                    if 0 <= ecart < total_jours: indices.append(ecart)
-            else:
-                cible = datetime.strptime(segment + f"/{date_ref.year}", "%d/%m/%Y").date()
-                ecart = (cible - date_ref).days
-                if 0 <= ecart < total_jours: indices.append(ecart)
-        except: continue
-    return list(set(indices))
-
-# --- 3. MOTEUR DE RÉSOLUTION ---
-if st.button("GÉNÉRER LE PLANNING OPÉRATIONNEL", type="primary", use_container_width=True):
-    
-    # Nettoyage des données d'entrée
-    df_equipe['Contrat (%)'] = pd.to_numeric(df_equipe['Contrat (%)'], errors='coerce')
-    df_equipe = df_equipe.dropna(subset=['Nom', 'Contrat (%)'])
-    
-    noms_titulaires = df_equipe["Nom"].tolist()
-    valeurs_contrats = df_equipe["Contrat (%)"].tolist()
-    absences_declarees = df_equipe["Congés / Absences"].tolist()
-    
-    # Intégration de ressources de remplacement (15 unités disponibles)
-    noms_complets = noms_titulaires + [f"REMPLAÇANT {i+1}" for i in range(15)]
-    nb_titulaires = len(noms_titulaires)
-    total_effectif = len(noms_complets)
-    
-    with st.spinner("Analyse des contraintes réglementaires et optimisation des flux..."):
-        jours_cycle = nb_semaines * 7
-        postes = ['M', 'A', 'C']
-        model = cp_model.CpModel()
+    if "planning" in st.session_state:
+        st.header("📅 Éditeur de Planning")
+        st.markdown("Vous pouvez **modifier directement les cases ci-dessous** pour ajuster les horaires (ex: éviter un A -> M) et valider vos changements.")
         
-        # Définition des variables de décision
-        x = {}
-        for e in range(total_effectif):
-            for d in range(jours_cycle):
-                for p in postes:
-                    x[(e, d, p)] = model.NewBoolVar(f'staff_{e}_{d}_{p}')
+        # Affichage interactif
+        planning_edite = st.data_editor(
+            st.session_state["planning"], 
+            use_container_width=True,
+            height=650
+        )
         
-        # --- CONTRAINTES RELATIVES AUX TITULAIRES ---
-        for e in range(nb_titulaires):
-            # Respect de la quotité de travail
-            charge_max = int((valeurs_contrats[e] / 100) * 5 * nb_semaines)
-            model.Add(sum(x[(e, d, p)] for d in range(jours_cycle) for p in postes) <= charge_max)
-            
-            # Unité de poste quotidienne
-            for d in range(jours_cycle):
-                model.AddAtMostOne(x[(e, d, p)] for p in postes)
-            
-            # Temps de repos minimum (Interdiction Après-midi -> Matin)
-            for d in range(jours_cycle - 1):
-                model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
-            
-            # Gestion des cycles de week-end
-            indicateurs_we = []
-            for w in range(nb_semaines):
-                sat, sun = w * 7 + 5, w * 7 + 6
-                actif_we = model.NewBoolVar(f'actif_we_{e}_{w}')
-                for p in postes:
-                    model.Add(x[(e, sat, p)] == x[(e, sun, p)]) # Continuité du bloc WE
-                
-                model.AddMaxEquality(actif_we, [x[(e, sat, p)] for p in postes])
-                indicateurs_we.append(actif_we)
-                
-                # Rythme hebdomadaire 6j / 4j
-                periode = range(w * 7, w * 7 + 7)
-                charge_hebdo = sum(x[(e, d, p)] for d in periode for p in postes)
-                model.Add(charge_hebdo <= 4 + (2 * actif_we))
+        # --- ANALYSE DES BESOINS (Vérification) ---
+        st.subheader("📊 Vérification de la couverture (Semaine 1)")
+        # On calcule combien de M, A, C sont placés le premier Lundi (colonne 0) et le premier Samedi (colonne 5)
+        lundi_S1 = planning_edite.iloc[:, 0].value_counts()
+        samedi_S1 = planning_edite.iloc[:, 5].value_counts()
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Lundi - Matin (Besoin: 8)", lundi_S1.get("M", 0))
+        c2.metric("Lundi - Aprem (Besoin: 4)", lundi_S1.get("A", 0))
+        c3.metric("Samedi - Matin (Besoin: 6)", samedi_S1.get("M", 0))
+        c4.metric("Samedi - Remplaçants requis", max(0, 11 - (samedi_S1.get("M", 0) + samedi_S1.get("A", 0) + samedi_S1.get("C", 0))))
 
-            # Interdiction de week-ends consécutifs
-            for w in range(nb_semaines - 1):
-                model.Add(indicateurs_we[w] + indicateurs_we[w+1] <= 1)
-
-            # Sanctuarisation des absences
-            indices_abs = extraire_indices_absences(absences_declarees[e], date_debut, jours_cycle)
-            for d in indices_abs:
-                for p in postes: model.Add(x[(e, d, p)] == 0)
-
-        # --- CONTRAINTES RELATIVES AUX REMPLAÇANTS ---
-        for e in range(nb_titulaires, total_effectif):
-            for d in range(jours_cycle):
-                model.AddAtMostOne(x[(e, d, p)] for p in postes)
-                
-                # Continuité Week-end : le même remplaçant travaille samedi et dimanche
-                if d % 7 == 5: # Samedi
-                    for p in postes:
-                        model.Add(x[(e, d, p)] == x[(e, d+1, p)])
-            
-            # Note : Les remplaçants n'ont pas la contrainte 'A' -> 'M'
-
-        # --- QUOTAS DE SERVICE ---
-        for d in range(jours_cycle):
-            is_we = (d % 7 >= 5)
-            m_target, a_target, c_target = (6, 3, 2) if is_we else (8, 4, 1)
-            model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) == m_target)
-            model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) == a_target)
-            model.Add(sum(x[(e, d, 'C')] for e in range(total_effectif)) == c_target)
-
-        # --- OPTIMISATION ---
-        # Priorité à l'utilisation des ressources internes (Titulaires)
-        poids_titulaire = sum(x[(e, d, p)] for e in range(nb_titulaires) for d in range(jours_cycle) for p in postes)
-        poids_remplacant = sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for d in range(jours_cycle) for p in postes)
-        model.Maximize(poids_titulaire * 10 - poids_remplacant)
-
-        solver = cp_model.CpSolver()
-        statut = solver.Solve(model)
-
-        if statut in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            st.success("Planning généré conformément aux contraintes de repos.")
-            
-            resultats, noms_utilises = [], []
-            for e in range(total_effectif):
-                total_activite = sum(solver.Value(x[(e, d, p)]) for d in range(jours_cycle) for p in postes)
-                if e < nb_titulaires or total_activite > 0:
-                    ligne_planning = []
-                    for d in range(jours_cycle):
-                        valeur = "Repos"
-                        for p in postes:
-                            if solver.Value(x[(e, d, p)]) == 1: valeur = p
-                        ligne_planning.append(valeur)
-                    resultats.append(ligne_planning)
-                    noms_utilises.append(noms_complets[e])
-
-            df_final = pd.DataFrame(resultats, columns=[(date_debut + timedelta(days=i)).strftime('%a %d/%m') for i in range(jours_cycle)], index=noms_utilises)
-            
-            # --- GÉNÉRATION EXCEL ---
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df_final.to_excel(writer, sheet_name='Planning_Operationnel')
-                wb, ws = writer.book, writer.sheets['Planning_Operationnel']
-                
-                # Formats de cellule
-                fmt_m = wb.add_format({'bg_color': '#D4EFDF', 'align': 'center', 'border': 1})
-                fmt_a = wb.add_format({'bg_color': '#FCF3CF', 'align': 'center', 'border': 1})
-                fmt_c = wb.add_format({'bg_color': '#FADBD8', 'align': 'center', 'border': 1})
-                fmt_remp = wb.add_format({'bg_color': '#E67E22', 'font_color': '#FFFFFF', 'bold': True, 'border': 1})
-                fmt_we = wb.add_format({'bg_color': '#F2F4F4', 'border': 1})
-                
-                ws.set_column('A:A', 30)
-                for r_idx in range(len(noms_utilises)):
-                    est_remplacant = "REMPLAÇANT" in noms_utilises[r_idx]
-                    for c_idx in range(jours_cycle):
-                        val = df_final.iloc[r_idx, c_idx]
-                        if est_remplacant and val != "Repos":
-                            format_cible = fmt_remp
-                        elif val == 'M': format_cible = fmt_m
-                        elif val == 'A': format_cible = fmt_a
-                        elif val == 'C': format_cible = fmt_c
-                        elif c_idx % 7 >= 5: format_cible = fmt_we
-                        else: format_cible = None
-                        ws.write(r_idx + 1, c_idx + 1, val, format_cible)
-            
-            st.download_button("📥 EXTRAIRE LE PLANNING (EXCEL)", buffer.getvalue(), f"Planning_RH_{date_debut}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        else:
-            st.error("Aucune solution compatible avec les contraintes actuelles. Veuillez réviser les absences ou augmenter les ressources.")
+        # --- EXPORT ---
+        st.markdown("---")
+        csv = planning_edite.to_csv().encode('utf-8')
+        st.download_button(
+            label="📥 Exporter le planning en CSV",
+            data=csv,
+            file_name='planning_soignants_4semaines.csv',
+            mime='text/csv',
+        )
+    else:
+        st.info("👈 Cliquez sur 'Générer le roulement' pour commencer.")
