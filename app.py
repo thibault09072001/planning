@@ -44,8 +44,8 @@ with st.sidebar:
         st.stop()
         
     st.markdown("---")
-    st.caption("🔒 Moteur de résolution v9.0 (Ultra Strict)")
-    st.caption("✓ Contrats stricts (20j/16j)\n✓ Max 4j consécutifs (Rétabli)\n✓ 9 Titulaires / 2 Remplaçants WE\n✓ Zéro remplaçant en semaine\n✓ Coupés : 16x (1 Sem/1 WE) + 2x (2 Sem/0 WE)")
+    st.caption("🔒 Moteur de résolution v9.1 (Corrigé)")
+    st.caption("✓ Contrats stricts (20j/16j)\n✓ Max 4j consécutifs\n✓ 9 Titulaires / 2 Remplaçants WE\n✓ Zéro remplaçant en Semaine\n✓ Coupés : 16x (1/1) + 2x (2/0)")
 
 # --- 3. ESPACE CENTRAL (TABLEAU DE BORD) ---
 st.title("Génération du Planning Opérationnel")
@@ -118,7 +118,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
         
         cibles_travail = [] 
         groupe_special_coupures = []
-        mult_cycle = nb_semaines // 4 # Multiplicateur (1 pour 4 semaines, 2 pour 8 semaines...)
+        mult_cycle = nb_semaines // 4 
         
         # --- CONTRAINTES TITULAIRES ---
         for e in range(nb_titulaires):
@@ -134,7 +134,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             for d in range(jours_cycle): model.AddAtMostOne(x[(e, d, p)] for p in postes)
             for d in range(jours_cycle - 1): model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
             
-            # 🛑 Règle des 4 jours consécutifs max (RÉTABLIE)
+            # 🛑 Max 4j consécutifs STRICT 
             for d in range(jours_cycle - 4): 
                 model.Add(sum(x[(e, d+i, p)] for i in range(5) for p in postes) <= 4)
             
@@ -148,7 +148,6 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             est_special = model.NewBoolVar(f'special_c_{e}')
             groupe_special_coupures.append(est_special)
             
-            # Égalité Stricte : L'IA n'a plus le choix.
             if mult_cycle >= 1:
                 model.Add(c_sem_var == (1 * mult_cycle) + est_special)
                 model.Add(c_we_var == (1 * mult_cycle) - est_special)
@@ -157,7 +156,11 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             for w in range(nb_semaines):
                 sat, sun = w * 7 + 5, w * 7 + 6
                 actif_we = model.NewBoolVar(f'actif_we_{e}_{w}')
-                for p in postes: model.Add(x[(e, sat, p)] == x[(e, sun, p)]) 
+                
+                # LA CORRECTION EST ICI : On force à travailler les 2 jours ou aucun, 
+                # MAIS plus obligatoirement sur le MÊME poste !
+                model.Add(sum(x[(e, sat, p)] for p in postes) == sum(x[(e, sun, p)] for p in postes))
+                
                 model.AddMaxEquality(actif_we, [x[(e, sat, p)] for p in postes])
                 indicateurs_we.append(actif_we)
                 periode = range(w * 7, w * 7 + 7)
@@ -167,7 +170,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             for d in indices_abs:
                 for p in postes: model.Add(x[(e, d, p)] == 0)
 
-        # 🛑 On force exactement 2 personnes (par bloc de 4 semaines) à être "Spéciales" (2 Sem / 0 WE)
+        # 🛑 On force exactement 2 personnes à être "Spéciales" (2 Sem / 0 WE)
         if mult_cycle >= 1:
             model.Add(sum(groupe_special_coupures) == 2 * mult_cycle)
 
@@ -178,8 +181,14 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                 model.AddAtMostOne(x[(e, d, p)] for p in postes)
                 if d % 7 < 5:
                     for p in postes: model.Add(x[(e, d, p)] == 0) # Zéro en semaine
+                
+                # Les remplaçants non plus ne sont plus obligés de faire la même lettre Samedi et Dimanche
                 if d % 7 == 5: 
-                    for p in postes: model.Add(x[(e, d, p)] == x[(e, d+1, p)])
+                    model.Add(sum(x[(e, d, p)] for p in postes) == sum(x[(e, d+1, p)] for p in postes))
+                    
+            # Interdiction mathématique pour les remplaçants de faire des coupés (pour soulager le cerveau de l'IA)
+            for d in range(jours_cycle):
+                model.Add(x[(e, d, 'C')] == 0)
 
         # --- QUOTAS DE SERVICE ---
         for d in range(jours_cycle):
@@ -200,7 +209,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
         model.Maximize(poids_titulaire * 10 - poids_remplacant)
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 75.0 # Un peu plus de temps pour l'équation exacte
+        solver.parameters.max_time_in_seconds = 75.0 
         statut = solver.Solve(model)
 
         if statut in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
