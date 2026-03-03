@@ -6,7 +6,7 @@ from ortools.sat.python import cp_model
 from datetime import datetime, timedelta
 
 # --- 1. CONFIGURATION DE L'INTERFACE ---
-st.set_page_config(page_title="Optimisation Planning EHPAD", page_icon="🏥", layout="layout="wide")
+st.set_page_config(page_title="Optimisation Planning EHPAD", page_icon="🏥", layout="wide")
 st.title("🏥 Système d'Ajustement des Ressources Humaines")
 st.markdown("Contraintes appliquées : Max 4 jours consécutifs, 9 titulaires + 2 remplaçants par week-end.")
 
