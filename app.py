@@ -8,10 +8,8 @@ from datetime import datetime, timedelta
 # --- 1. CONFIGURATION DE L'INTERFACE (MODE PRO) ---
 st.set_page_config(page_title="Système RH | Planning EHPAD", page_icon="🏥", layout="wide", initial_sidebar_state="expanded")
 
-# --- INJECTION CSS POUR LE BOUTON VERT ---
 st.markdown("""
 <style>
-/* Cibler spécifiquement le bouton de téléchargement Streamlit pour le rendre vert pro */
 div.stDownloadButton > button {
     background-color: #28a745 !important;
     color: white !important;
@@ -46,8 +44,8 @@ with st.sidebar:
         st.stop()
         
     st.markdown("---")
-    st.caption("🔒 Moteur de résolution v6.1")
-    st.caption("✓ Contrats stricts\n✓ Max 4j consécutifs\n✓ 9 Titulaires / 2 Remplaçants (WE)")
+    st.caption("🔒 Moteur de résolution v8.0")
+    st.caption("✓ Contrats stricts (20j/16j)\n✓ Max 4j consécutifs\n✓ 9 Titulaires / 2 Remplaçants WE\n✓ Zéro remplaçant en semaine\n✓ Audit 'Coupés' Intégré")
 
 # --- 3. ESPACE CENTRAL (TABLEAU DE BORD) ---
 st.title("Génération du Planning Opérationnel")
@@ -72,7 +70,6 @@ data_base = pd.DataFrame({
 st.subheader("Registre du Personnel")
 df_equipe = st.data_editor(data_base, num_rows="dynamic", use_container_width=True)
 
-# --- UTILITAIRE DE TRAITEMENT DES DATES ---
 def extraire_indices_absences(texte, date_ref, total_jours):
     indices = []
     if not texte or pd.isna(texte): return indices
@@ -109,8 +106,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
     nb_titulaires = len(noms_titulaires)
     total_effectif = len(noms_complets)
     
-    # Remplacement du menu déroulant par un simple indicateur de chargement propre
-    with st.spinner("Analyse des contrats et génération du planning en cours (environ 30 secondes)..."):
+    with st.spinner("Analyse des contrats et génération du planning en cours (environ 30-45 secondes)..."):
         jours_cycle = nb_semaines * 7
         postes = ['M', 'A', 'C']
         model = cp_model.CpModel()
@@ -135,6 +131,22 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             for d in range(jours_cycle - 1): model.AddImplication(x[(e, d, 'A')], x[(e, d+1, 'M')].Not())
             for d in range(jours_cycle - 4): model.Add(sum(x[(e, d+i, p)] for i in range(5) for p in postes) <= 4)
             
+            # 🛑 RÈGLE D'OR DES HORAIRES COUPÉS ('C')
+            limite_c_total = math.ceil(2 * (nb_semaines / 4.0)) # 2 max sur 4 semaines
+            limite_c_we = math.ceil(1 * (nb_semaines / 4.0))    # 1 max le WE
+            
+            jours_semaine = [d for d in range(jours_cycle) if d % 7 < 5]
+            jours_we = [d for d in range(jours_cycle) if d % 7 >= 5]
+            
+            c_sem_var = sum(x[(e, d, 'C')] for d in jours_semaine)
+            c_we_var = sum(x[(e, d, 'C')] for d in jours_we)
+            
+            # Application des limites
+            model.Add(c_sem_var <= limite_c_total)
+            model.Add(c_we_var <= limite_c_we)
+            # 🪄 Magie Mathématique : Si c_sem_var vaut 2, c_we_var sera FORCÉ à 0 pour ne pas dépasser 2 au total.
+            model.Add(c_sem_var + c_we_var <= limite_c_total)
+            
             indicateurs_we = []
             for w in range(nb_semaines):
                 sat, sun = w * 7 + 5, w * 7 + 6
@@ -154,6 +166,11 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
             cibles_travail.append("Remp.") 
             for d in range(jours_cycle):
                 model.AddAtMostOne(x[(e, d, p)] for p in postes)
+                
+                # 🛑 NOUVEAU : Interdiction stricte de travailler en semaine pour les remplaçants
+                if d % 7 < 5:
+                    for p in postes: model.Add(x[(e, d, p)] == 0)
+                
                 if d % 7 == 5: 
                     for p in postes: model.Add(x[(e, d, p)] == x[(e, d+1, p)])
 
@@ -176,7 +193,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
         model.Maximize(poids_titulaire * 10 - poids_remplacant)
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 45.0
+        solver.parameters.max_time_in_seconds = 60.0
         statut = solver.Solve(model)
 
         if statut in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
@@ -186,6 +203,8 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                 if e < nb_titulaires or total_activite > 0:
                     ligne_planning = []
                     jours_travailles = 0
+                    c_semaine = 0
+                    c_we = 0
                     
                     for d in range(jours_cycle):
                         valeur = "Repos"
@@ -193,6 +212,9 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                             if solver.Value(x[(e, d, p)]) == 1: 
                                 valeur = p
                                 jours_travailles += 1
+                                if p == 'C':
+                                    if d % 7 < 5: c_semaine += 1
+                                    else: c_we += 1
                         ligne_planning.append(valeur)
                     
                     enchainements_am = 0
@@ -203,11 +225,12 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                     resultats.append(ligne_planning)
                     noms_utilises.append(noms_complets[e])
                     
+                    # 📊 NOUVEL AUDIT COMPLET
                     if e < nb_titulaires:
-                        audit_txt = f"{jours_travailles}j / {cibles_travail[e]}j | {enchainements_am} A->M"
+                        audit_txt = f"{jours_travailles}j/{cibles_travail[e]}j | {c_semaine}C Sem, {c_we}C WE | {enchainements_am} A->M"
                         if jours_travailles != cibles_travail[e]: audit_txt = "❌ ERREUR CONTRAT"
                     else:
-                        audit_txt = f"{jours_travailles}j (Vacations)"
+                        audit_txt = f"{jours_travailles}j WE | {c_semaine}C Sem, {c_we}C WE"
                     
                     audit_data.append(audit_txt)
 
@@ -235,7 +258,7 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                 ws.set_row(0, 35) 
                 ws.set_column('A:A', 25) 
                 ws.set_column(1, jours_cycle, 13) 
-                ws.set_column(jours_cycle + 1, jours_cycle + 1, 20) 
+                ws.set_column(jours_cycle + 1, jours_cycle + 1, 45) # Colonne Audit ultra-large
                 ws.freeze_panes(2, 1) 
                 
                 ws.merge_range(0, 0, 0, jours_cycle + 1, f"PLANNING OPÉRATIONNEL - CYCLE DÉBUTANT LE {date_debut.strftime('%d/%m/%Y')}", fmt_titre)
@@ -259,7 +282,6 @@ if st.button("🚀 LANCER L'OPTIMISATION DU PLANNING", type="primary", use_conta
                     ws.write(r_idx + 2, jours_cycle + 1, df_final.iloc[r_idx, jours_cycle], fmt_audit)
             
             st.success("✅ Fichier Excel généré avec succès !")
-            # LE BOUTON VERT ARRIVE ICI
             st.download_button("📥 TÉLÉCHARGER LE PLANNING", buffer.getvalue(), f"Planning_Direction_{date_debut.strftime('%d-%m-%Y')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         else:
