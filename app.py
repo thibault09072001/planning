@@ -35,24 +35,23 @@ with st.sidebar:
     nb_semaines = st.number_input("⏱️ Durée du cycle (semaines)", min_value=4, max_value=12, value=4, step=4)
     
     st.markdown("---")
-    st.caption("🔒 Moteur de Matrice v13.0 (Élastique)")
-    st.caption("✓ S'adapte à tout effectif\n✓ Renforts automatiques (Matin)\n✓ Lissage intelligent des Coupés\n✓ Roulement Infini\n✓ Max 4j consécutifs")
+    st.caption("🔒 Moteur de Matrice v13.1 (Élastique & Propre)")
+    st.caption("✓ Exactement 2 Remplaçants\n✓ Renforts auto (Matin)\n✓ Lissage intelligent des Coupés\n✓ Roulement Infini\n✓ Max 4j consécutifs")
 
 # --- 3. ESPACE CENTRAL ---
 st.title("Génération de la Matrice de Roulement")
-st.info("💡 Le système est désormais 'élastique'. Ajoutez des salariés : l'IA lissera les coupés et créera des postes de renfort le matin.")
+st.info("💡 Matrice élastique : Ajoutez un titulaire, il prendra automatiquement les postes en renfort le matin et soulagera les coupés de l'équipe, tout en gardant exactement 2 remplaçants fixes le week-end.")
 
 col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
 with col_kpi1:
     st.metric(label="Jours de la matrice", value=nb_semaines * 7)
 with col_kpi2:
-    st.metric(label="Titulaires", value="Flexible")
+    st.metric(label="Titulaires le WE", value="9")
 with col_kpi3:
-    st.metric(label="Remplaçants", value="Ajustement Auto")
+    st.metric(label="Remplaçants fixes", value="2")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# Registre de base avec 18 personnes, mais vous pouvez en ajouter !
 data_base = pd.DataFrame({
     "Nom": [f"Salarié {i+1}" for i in range(15)] + [f"Salarié {i+16}" for i in range(3)],
     "Contrat (%)": [100]*15 + [80]*3
@@ -72,8 +71,8 @@ if st.button("🚀 GÉNÉRER LA MATRICE INTELLIGENTE", type="primary", use_conta
     noms_titulaires = df_equipe["Nom"].tolist()
     valeurs_contrats = df_equipe["Contrat (%)"].tolist()
     
-    # On met 4 remplaçants potentiels, l'IA n'utilisera que ce dont elle a strictement besoin
-    noms_complets = noms_titulaires + [f"REMPLAÇANT {i+1}" for i in range(4)]
+    # 🛑 CORRECTION ICI : Retour STRICT à exactement 2 remplaçants. Pas une ligne de plus.
+    noms_complets = noms_titulaires + ["REMPLAÇANT 1", "REMPLAÇANT 2"]
     nb_titulaires = len(noms_titulaires)
     total_effectif = len(noms_complets)
     
@@ -88,7 +87,7 @@ if st.button("🚀 GÉNÉRER LA MATRICE INTELLIGENTE", type="primary", use_conta
                     x[(e, d, p)] = model.NewBoolVar(f'staff_{e}_{d}_{p}')
         
         cibles_travail = [] 
-        penalites_c = [] # Variable d'élasticité pour les coupés
+        penalites_c = [] 
         mult_cycle = nb_semaines // 4 
         
         # --- LOGIQUE TITULAIRES ---
@@ -108,7 +107,7 @@ if st.button("🚀 GÉNÉRER LA MATRICE INTELLIGENTE", type="primary", use_conta
             for d in range(jours_cycle): 
                 model.Add(sum(x[(e, (d+i) % jours_cycle, p)] for i in range(5) for p in postes) <= 4)
             
-            # 🛑 LISSAGE ÉLASTIQUE DES COUPÉS ('C')
+            # LISSAGE ÉLASTIQUE DES COUPÉS ('C')
             j_sem = [d for d in range(jours_cycle) if d % 7 < 5]
             j_we = [d for d in range(jours_cycle) if d % 7 >= 5]
             c_sem_var = sum(x[(e, d, 'C')] for d in j_sem)
@@ -118,7 +117,7 @@ if st.button("🚀 GÉNÉRER LA MATRICE INTELLIGENTE", type="primary", use_conta
             model.Add(c_sem_var + c_we_var <= 2 * mult_cycle)
             model.Add(c_we_var <= 1 * mult_cycle)
             
-            # L'IA est pénalisée si elle donne plus de 1 coupé en semaine (elle le fera donc uniquement si l'effectif l'y oblige)
+            # Pénalité pour l'IA si elle donne plus de 1 coupé en semaine
             temp_excess = model.NewIntVar(-100, 100, f'temp_excess_{e}')
             model.Add(temp_excess == c_sem_var - (1 * mult_cycle))
             excess_c_sem = model.NewIntVar(0, 100, f'excess_c_sem_{e}')
@@ -138,7 +137,7 @@ if st.button("🚀 GÉNÉRER LA MATRICE INTELLIGENTE", type="primary", use_conta
             for w in range(nb_semaines): 
                 model.Add(ind_we[w] + ind_we[(w + 1) % nb_semaines] <= 1)
 
-        # --- LOGIQUE REMPLAÇANTS (Utilisés uniquement si nécessaire) ---
+        # --- LOGIQUE REMPLAÇANTS (Uniquement WE) ---
         for e in range(nb_titulaires, total_effectif):
             cibles_travail.append("Remp.") 
             for d in range(jours_cycle):
@@ -154,17 +153,17 @@ if st.button("🚀 GÉNÉRER LA MATRICE INTELLIGENTE", type="primary", use_conta
             is_we = (d % 7 >= 5)
             m_t, a_t, c_t = (6, 3, 2) if is_we else (8, 4, 1)
             
-            # Le '>=' sur le matin permet à l'IA de placer les heures en trop comme Renfort !
+            # Le '>=' sur le matin permet d'absorber les soignants supplémentaires
             model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) >= m_t) 
             model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) == a_t)
             model.Add(sum(x[(e, d, 'C')] for e in range(total_effectif)) == c_t)
+            if is_we:
+                model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires) for p in postes) == 9)
+                model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for p in postes) == 2)
 
         # --- OPTIMISATION GLOBALE ---
-        # 1. On minimise au maximum l'utilisation des remplaçants (poids 500)
-        # 2. On minimise la surcharge des coupés en semaine (poids 100)
-        poids_remplacant = sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for d in range(jours_cycle) for p in postes)
-        
-        model.Minimize(poids_remplacant * 500 + sum(penalites_c) * 100)
+        # L'IA va chercher à minimiser les coupés excessifs en semaine
+        model.Minimize(sum(penalites_c))
 
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = 75.0 
@@ -184,10 +183,6 @@ if st.button("🚀 GÉNÉRER LA MATRICE INTELLIGENTE", type="primary", use_conta
                                 else: c_w += 1
                     ligne.append(v)
                 
-                # On nettoie la liste des remplaçants qui n'ont pas du tout été utilisés par l'IA
-                if e >= nb_titulaires and j_t == 0:
-                    continue
-                    
                 enchain_am = sum(1 for d in range(jours_cycle) if ligne[d] == 'A' and ligne[(d+1)%jours_cycle] == 'M')
                 resultats.append(ligne)
                 noms_utilises.append(noms_complets[e])
@@ -235,7 +230,7 @@ if st.button("🚀 GÉNÉRER LA MATRICE INTELLIGENTE", type="primary", use_conta
                         ws.write(r+3, c+1, val, fmt)
                     ws.write(r+3, jours_cycle+1, audit_data[r], f_audit)
             
-            st.success("✅ Matrice de roulement générée avec l'algorithme élastique !")
-            st.download_button("📥 TÉLÉCHARGER LA MATRICE", buffer.getvalue(), "Matrice_Roulement_Flexible.xlsx")
+            st.success("✅ Matrice de roulement générée (Propre et Élégante) !")
+            st.download_button("📥 TÉLÉCHARGER LA MATRICE", buffer.getvalue(), "Matrice_Roulement_Parfaite.xlsx")
         else:
             st.error("❌ Les contraintes sont trop strictes pour l'effectif actuel.")
