@@ -43,11 +43,11 @@ with st.sidebar:
     st.markdown("---")
     nb_semaines = st.number_input("Durée du cycle (semaines)", min_value=4, max_value=12, value=4, step=4)
     st.markdown("---")
-    st.markdown("**Paramètres du Moteur (v14.2)**")
+    st.markdown("**Paramètres du Moteur (v14.3)**")
     st.markdown("""
     <ul style='font-size: 13px; color: #5D6D7E; padding-left: 20px;'>
-        <li>Équilibre automatique Matin / Après-midi</li>
-        <li>Max 1 Coupé par semaine (Remplacé par M/A si besoin)</li>
+        <li>Équité de Groupe : Max 2 écarts M/A entre contrats identiques</li>
+        <li>Max 1 Coupé par semaine</li>
         <li>Matrice de roulement perpétuelle</li>
         <li>Respect strict des contrats</li>
         <li>Max 4j consécutifs</li>
@@ -56,7 +56,7 @@ with st.sidebar:
 
 # --- 3. ESPACE CENTRAL ---
 st.title("Matrice de Roulement Structurelle")
-st.info("💡 **Nouveauté :** Le moteur équilibre désormais automatiquement le nombre de Matins et d'Après-midis pour chaque soignant, tout en limitant les coupés à 1 par semaine maximum.")
+st.info("💡 **Nouveauté :** Finis les salariés surchargés de matins. L'algorithme garantit désormais un écart maximum de 2 Matins ou 2 Après-midis entre les soignants ayant la même quotité de contrat.")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Format Matrice", f"{nb_semaines} Semaines")
@@ -88,7 +88,7 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
     nb_titulaires = len(noms_titulaires)
     total_effectif = len(noms_complets)
     
-    with st.spinner("Équilibrage des Matins/Après-midis et lissage des Coupés (env. 45 sec)..."):
+    with st.spinner("Équilibrage de l'équipe (Écart Max = 2) et lissage (env. 60-90 sec)..."):
         jours_cycle = nb_semaines * 7
         postes = ['M', 'A', 'C']
         model = cp_model.CpModel()
@@ -99,9 +99,13 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                     x[(e, d, p)] = model.NewBoolVar(f'staff_{e}_{d}_{p}')
         
         cibles_travail = [] 
-        penalites_ma = [] # Pour équilibrer Matin et Après-midi
-        manque_c = []     # Pour distribuer les coupés au maximum
+        penalites_equite = [] # Les pénalités pour forcer l'équité M/A
+        manque_c = []         
         mult_cycle = nb_semaines // 4 
+        
+        # Variables de comptage globales par salarié
+        m_tot_vars = []
+        a_tot_vars = []
         
         # --- LOGIQUE TITULAIRES ---
         for e in range(nb_titulaires):
@@ -113,16 +117,15 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
             for d in range(jours_cycle): model.AddImplication(x[(e, d, 'A')], x[(e, (d + 1) % jours_cycle, 'M')].Not())
             for d in range(jours_cycle): model.Add(sum(x[(e, (d+i) % jours_cycle, p)] for i in range(5) for p in postes) <= 4)
             
-            # ÉQUILIBRE MATIN / APRÈS-MIDI
-            m_tot = sum(x[(e, d, 'M')] for d in range(jours_cycle))
-            a_tot = sum(x[(e, d, 'A')] for d in range(jours_cycle))
-            ecart_ma = model.NewIntVar(-30, 30, f'ecart_ma_{e}')
-            model.Add(ecart_ma == m_tot - a_tot)
-            abs_ecart_ma = model.NewIntVar(0, 30, f'abs_ecart_ma_{e}')
-            model.AddAbsEquality(abs_ecart_ma, ecart_ma)
-            penalites_ma.append(abs_ecart_ma)
+            # COMPTAGE DES MATINS ET APRÈS-MIDIS
+            m_var = model.NewIntVar(0, 28, f'm_tot_{e}')
+            a_var = model.NewIntVar(0, 28, f'a_tot_{e}')
+            model.Add(m_var == sum(x[(e, d, 'M')] for d in range(jours_cycle)))
+            model.Add(a_var == sum(x[(e, d, 'A')] for d in range(jours_cycle)))
+            m_tot_vars.append(m_var)
+            a_tot_vars.append(a_var)
             
-            # GESTION DES COUPÉS (Max 1 par semaine, compensé en M/A)
+            # GESTION DES COUPÉS
             j_sem = [d for d in range(jours_cycle) if d % 7 < 5]
             j_we = [d for d in range(jours_cycle) if d % 7 >= 5]
             c_sem_var = sum(x[(e, d, 'C')] for d in j_sem)
@@ -131,11 +134,11 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
             model.Add(c_sem_var <= 1 * mult_cycle)
             model.Add(c_we_var <= 1 * mult_cycle)
             
-            # On pousse l'IA à donner 1 coupé en semaine (s'il en manque, ça pénalise légèrement)
             manque_c_sem = model.NewIntVar(0, 10, f'manque_c_{e}')
             model.Add(manque_c_sem == (1 * mult_cycle) - c_sem_var)
             manque_c.append(manque_c_sem)
             
+            # WEEK-ENDS
             ind_we = []
             for w in range(nb_semaines):
                 sat, sun = w * 7 + 5, w * 7 + 6
@@ -147,6 +150,41 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
 
             for w in range(nb_semaines): 
                 model.Add(ind_we[w] + ind_we[(w + 1) % nb_semaines] <= 1)
+
+        # 🛑 L'ÉQUITÉ DE GROUPE (La fameuse règle des "2 d'écart max")
+        for contrat in set(valeurs_contrats):
+            indices_groupe = [e for e in range(nb_titulaires) if valeurs_contrats[e] == contrat]
+            
+            if len(indices_groupe) > 1:
+                # Équilibre des MATINS
+                max_m = model.NewIntVar(0, 28, f'max_m_{contrat}')
+                min_m = model.NewIntVar(0, 28, f'min_m_{contrat}')
+                model.AddMaxEquality(max_m, [m_tot_vars[e] for e in indices_groupe])
+                model.AddMinEquality(min_m, [m_tot_vars[e] for e in indices_groupe])
+                
+                ecart_m = model.NewIntVar(0, 28, f'ecart_m_{contrat}')
+                model.Add(ecart_m == max_m - min_m)
+                
+                depassement_m = model.NewIntVar(0, 28, f'depassement_m_{contrat}')
+                model.AddMaxEquality(depassement_m, [0, ecart_m - 2]) # 0 si l'écart est <= 2
+                
+                penalites_equite.append(depassement_m * 5000) # Mur infranchissable (Interdit de dépasser 2)
+                penalites_equite.append(ecart_m * 10)         # Lissage permanent
+                
+                # Équilibre des APRÈS-MIDIS
+                max_a = model.NewIntVar(0, 28, f'max_a_{contrat}')
+                min_a = model.NewIntVar(0, 28, f'min_a_{contrat}')
+                model.AddMaxEquality(max_a, [a_tot_vars[e] for e in indices_groupe])
+                model.AddMinEquality(min_a, [a_tot_vars[e] for e in indices_groupe])
+                
+                ecart_a = model.NewIntVar(0, 28, f'ecart_a_{contrat}')
+                model.Add(ecart_a == max_a - min_a)
+                
+                depassement_a = model.NewIntVar(0, 28, f'depassement_a_{contrat}')
+                model.AddMaxEquality(depassement_a, [0, ecart_a - 2])
+                
+                penalites_equite.append(depassement_a * 5000)
+                penalites_equite.append(ecart_a * 10)
 
         # --- LOGIQUE VACATAIRES ---
         for e in range(nb_titulaires, total_effectif):
@@ -169,18 +207,16 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires) for p in postes) == 9)
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for p in postes) == 2)
             else:
-                # La souplesse est ici : Les 'C' manquants deviennent des 'M' ou des 'A'
                 model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) >= 8)
                 model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) >= 4)
                 model.Add(sum(x[(e, d, 'C')] for e in range(total_effectif)) <= 1)
 
         # --- OPTIMISATION GLOBALE ---
-        # 1. On équilibre les M et A (Priorité haute)
-        # 2. On essaie de placer un maximum de coupés (dans la limite de 1/personne) pour soulager la semaine
-        model.Minimize(sum(penalites_ma) * 10 + sum(manque_c) * 5)
+        # Priorité absolue : sum(penalites_equite) qui empêche tout écart supérieur à 2 entre salariés de même contrat
+        model.Minimize(sum(penalites_equite) + sum(manque_c) * 5)
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 75.0 
+        solver.parameters.max_time_in_seconds = 90.0 # Plus de temps car l'équité croisée est complexe
         statut = solver.Solve(model)
 
         if statut in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
@@ -205,6 +241,7 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                 
                 if e < nb_titulaires:
                     etoile = "🌟 " if c_w == 0 else "✓ "
+                    # Audit explicite avec le décompte M et A
                     audit_data.append(f"{etoile}{j_t}j | {c_s}C Sem / {c_w}C WE | {m_t}M / {a_t}A | {enchain_am} AM")
                 else:
                     audit_data.append(f"VACATION | {m_t}M / {a_t}A")
@@ -233,13 +270,13 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                 
                 ws.set_column('A:A', 28)
                 ws.set_column(1, jours_cycle, 5)
-                ws.set_column(jours_cycle+1, jours_cycle+1, 48) # Élargi pour l'audit M/A
+                ws.set_column(jours_cycle+1, jours_cycle+1, 48) # Ultra large pour le décompte
                 ws.set_default_row(20)
                 ws.freeze_panes(6, 1)
                 
                 date_gen = datetime.now().strftime('%d/%m/%Y à %H:%M')
                 ws.merge_range(0, 0, 0, jours_cycle + 1, "MATRICE DE ROULEMENT EHPAD", f_titre)
-                ws.merge_range(1, 0, 1, jours_cycle + 1, f"Document généré le {date_gen} | Cycle : {nb_semaines} semaines", f_date)
+                ws.merge_range(1, 0, 1, jours_cycle + 1, f"Document généré le {date_gen} | Équité M/A garantie (Max 2 d'écart)", f_date)
                 
                 ws.write(3, 0, "Légende des postes :", wb.add_format({'bold': True}))
                 ws.write(3, 1, "M", f_leg_m)
@@ -270,7 +307,7 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                         ws.write(r+6, c+1, val, fmt)
                     ws.write(r+6, jours_cycle+1, audit_data[r], f_audit)
             
-            st.success("✅ Matrice RH générée ! M/A équilibrés avec succès.")
+            st.success("✅ Matrice RH générée ! M/A équilibrés avec succès entre salariés de même contrat.")
             st.download_button("📥 TÉLÉCHARGER LE FICHIER EXCEL", buffer.getvalue(), "Matrice_OptiStaff_Equilibree.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
             st.error("❌ Les contraintes contractuelles sont incompatibles avec l'effectif actuel.")
