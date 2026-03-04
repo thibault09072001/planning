@@ -53,12 +53,13 @@ with st.sidebar:
         <li>Semaine sans coupé : Fixé à 9 Matins et 5 Après-midis</li>
         <li>Matrice de roulement cyclique</li>
         <li>Max 4 jours consécutifs travaillés</li>
+        <li>Repos journalier garanti (A->M, A->C et C->M interdits)</li>
     </ul>
     """, unsafe_allow_html=True)
 
 # --- 3. ESPACE CENTRAL ---
 st.title("Génération de la Matrice de Roulement")
-st.info("Information : L'algorithme répartit les postes selon les quotités de contrat, respecte un maximum de 4 jours consécutifs, limite l'écart à 1 poste entre les Matins et Après-midis par contrat, et régule le nombre d'agents par jour en semaine.")
+st.info("Information : L'algorithme répartit les postes selon les quotités de contrat, respecte un maximum de 4 jours consécutifs, limite l'écart à 1 poste entre les Matins et Après-midis par contrat, et garantit les temps de repos (interdiction d'enchaîner A->M, A->C et C->M).")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Format Matrice", f"{nb_semaines} Semaines")
@@ -110,9 +111,19 @@ if st.button("Générer la Matrice", use_container_width=True):
             cible_jours = int((valeurs_contrats[e] / 100) * 5 * nb_semaines)
             
             model.Add(sum(x[(e, d, p)] for d in range(jours_cycle) for p in postes) == cible_jours)
-            for d in range(jours_cycle): model.AddAtMostOne(x[(e, d, p)] for p in postes)
-            for d in range(jours_cycle): model.AddImplication(x[(e, d, 'A')], x[(e, (d + 1) % jours_cycle, 'M')].Not())
-            for d in range(jours_cycle): model.Add(sum(x[(e, (d+i) % jours_cycle, p)] for i in range(5) for p in postes) <= 4)
+            
+            for d in range(jours_cycle): 
+                model.AddAtMostOne(x[(e, d, p)] for p in postes)
+                
+            for d in range(jours_cycle): 
+                model.Add(sum(x[(e, (d+i) % jours_cycle, p)] for i in range(5) for p in postes) <= 4)
+
+            # RÈGLES DE REPOS JOURNALIER (Enchaînements interdits)
+            for d in range(jours_cycle): 
+                jour_suivant = (d + 1) % jours_cycle
+                model.AddImplication(x[(e, d, 'A')], x[(e, jour_suivant, 'M')].Not()) # Pas de A -> M
+                model.AddImplication(x[(e, d, 'A')], x[(e, jour_suivant, 'C')].Not()) # Pas de A -> C
+                model.AddImplication(x[(e, d, 'C')], x[(e, jour_suivant, 'M')].Not()) # Pas de C -> M
             
             # VARIABLES MATIN / APRÈS-MIDI
             m_var = model.NewIntVar(0, 28, f'm_tot_{e}')
