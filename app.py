@@ -43,12 +43,12 @@ with st.sidebar:
     st.markdown("---")
     nb_semaines = st.number_input("Durée du cycle (semaines)", min_value=4, max_value=12, value=4, step=4)
     st.markdown("---")
-    st.markdown("**Paramètres du Moteur (v15.1)**")
+    st.markdown("**Paramètres du Moteur (v15.2)**")
     st.markdown("""
     <ul style='font-size: 13px; color: #5D6D7E; padding-left: 20px;'>
         <li><b>Coupés Semaine :</b> 1 pour TOUS</li>
         <li><b>Coupés WE :</b> 16 personnes à 1, 2 "chanceux" à 0</li>
-        <li>Équité stricte M/A (Max 2 d'écart)</li>
+        <li><b>Équité Ultime M/A :</b> Max 1 d'écart !</li>
         <li>Matrice de roulement perpétuelle</li>
         <li>Respect strict des contrats</li>
         <li>Max 4j consécutifs</li>
@@ -57,7 +57,7 @@ with st.sidebar:
 
 # --- 3. ESPACE CENTRAL ---
 st.title("Matrice de Roulement Structurelle")
-st.info("💡 **Règle validée :** Les 18 salariés auront STRICTEMENT 1 coupé en semaine. Pour le week-end, 16 en auront 1, et 2 auront la chance de ne pas en faire.")
+st.info("💡 **Perfection Validée :** Les écarts de Matin (M) et d'Après-Midi (A) sont désormais bridés à **1 maximum** au sein d'un même groupe de contrat. C'est l'équité absolue.")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Format Matrice", f"{nb_semaines} Semaines")
@@ -89,7 +89,7 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
     nb_titulaires = len(noms_titulaires)
     total_effectif = len(noms_complets)
     
-    with st.spinner("Application stricte (1 C semaine pour tous, 2 chanceux WE) et équité M/A..."):
+    with st.spinner("Application de l'équité ULTIME (Écart M/A ≤ 1). Recherche de la solution parfaite (jusqu'à 120 sec)..."):
         jours_cycle = nb_semaines * 7
         postes = ['M', 'A', 'C']
         model = cp_model.CpModel()
@@ -121,14 +121,12 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
             m_tot_vars.append(m_var)
             a_tot_vars.append(a_var)
             
-            # 🛑 LA NOUVELLE RÈGLE EXACTE DES COUPÉS ('C')
+            # 🛑 LA RÈGLE D'OR DES COUPÉS ('C') : 1 ET 1 POUR TOUT LE MONDE
             j_sem = [d for d in range(jours_cycle) if d % 7 < 5]
             j_we = [d for d in range(jours_cycle) if d % 7 >= 5]
             
-            # Tout le monde fait 1 coupé en semaine (multiplier par le nb de cycles de 4 sem)
             model.Add(sum(x[(e, d, 'C')] for d in j_sem) == 1 * mult_cycle)
             
-            # 2 chanceux feront 0 le week-end. Les autres 1.
             est_chanceux = model.NewBoolVar(f'chanceux_{e}')
             groupe_chanceux.append(est_chanceux)
             model.Add(sum(x[(e, d, 'C')] for d in j_we) == (1 * mult_cycle) - est_chanceux)
@@ -146,10 +144,10 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
             for w in range(nb_semaines): 
                 model.Add(ind_we[w] + ind_we[(w + 1) % nb_semaines] <= 1)
         
-        # Exactement 2 chanceux par bloc de 4 semaines
+        # Exactement 2 chanceux (0 Coupé WE) par bloc de 4 semaines
         model.Add(sum(groupe_chanceux) == 2 * mult_cycle)
 
-        # 🛑 ÉQUITÉ DE GROUPE M/A (ÉCART MAX = 2)
+        # 🛑 ÉQUITÉ ULTIME DE GROUPE M/A (ÉCART MAX = 1)
         for contrat in set(valeurs_contrats):
             indices_groupe = [e for e in range(nb_titulaires) if valeurs_contrats[e] == contrat]
             
@@ -158,13 +156,13 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                 min_m = model.NewIntVar(0, 28, f'min_m_{contrat}')
                 model.AddMaxEquality(max_m, [m_tot_vars[e] for e in indices_groupe])
                 model.AddMinEquality(min_m, [m_tot_vars[e] for e in indices_groupe])
-                model.Add(max_m - min_m <= 2) # Contrainte dure
+                model.Add(max_m - min_m <= 1) # <-- Le verrou est ici (Écart de 1 strict)
                 
                 max_a = model.NewIntVar(0, 28, f'max_a_{contrat}')
                 min_a = model.NewIntVar(0, 28, f'min_a_{contrat}')
                 model.AddMaxEquality(max_a, [a_tot_vars[e] for e in indices_groupe])
                 model.AddMinEquality(min_a, [a_tot_vars[e] for e in indices_groupe])
-                model.Add(max_a - min_a <= 2) # Contrainte dure
+                model.Add(max_a - min_a <= 1) # <-- Le verrou est ici (Écart de 1 strict)
 
         # --- LOGIQUE VACATAIRES ---
         for e in range(nb_titulaires, total_effectif):
@@ -184,13 +182,13 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
             if is_we:
                 model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) >= 6)
                 model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) == 3)
-                model.Add(c_daily == 2) # Strictement 16 coupés WE = 2 par jour sur 8 jours
+                model.Add(c_daily == 2) 
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires) for p in postes) == 9)
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for p in postes) == 2)
             else:
                 model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) >= 8)
                 model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) >= 4)
-                model.Add(c_daily <= 1) # 18 coupés à placer sur 20 jours. Max 1 par jour. (2 jours n'auront pas de coupé)
+                model.Add(c_daily <= 1) 
 
         # --- OPTIMISATION ---
         poids_titulaire = sum(x[(e, d, p)] for e in range(nb_titulaires) for d in range(jours_cycle) for p in postes)
@@ -198,7 +196,7 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
         model.Maximize(poids_titulaire * 10 - poids_vacataire)
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 60.0 
+        solver.parameters.max_time_in_seconds = 120.0 # Plus de temps pour cette équation parfaite
         statut = solver.Solve(model)
 
         if statut in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
@@ -257,7 +255,7 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                 
                 date_gen = datetime.now().strftime('%d/%m/%Y à %H:%M')
                 ws.merge_range(0, 0, 0, jours_cycle + 1, "MATRICE DE ROULEMENT EHPAD", f_titre)
-                ws.merge_range(1, 0, 1, jours_cycle + 1, f"Généré le {date_gen} | Équité M/A Garantie | 1 C en Semaine pour TOUS (2 chanceux sans WE)", f_date)
+                ws.merge_range(1, 0, 1, jours_cycle + 1, f"Généré le {date_gen} | Équité Ultime M/A (Max 1 d'écart) | Coupés : 1 Semaine / 1 WE", f_date)
                 
                 ws.write(3, 0, "Légende des postes :", wb.add_format({'bold': True}))
                 ws.write(3, 1, "M", f_leg_m)
@@ -288,7 +286,7 @@ if st.button("⚙️ GÉNÉRER LA MATRICE OPTIMISÉE", use_container_width=True)
                         ws.write(r+6, c+1, val, fmt)
                     ws.write(r+6, jours_cycle+1, audit_data[r], f_audit)
             
-            st.success("✅ Matrice RH générée ! La règle des coupés est strictement respectée.")
-            st.download_button("📥 TÉLÉCHARGER LE FICHIER EXCEL", buffer.getvalue(), "Matrice_OptiStaff.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.success("✅ Matrice RH Ultime générée ! Différence maximum de 1 poste (M ou A) respectée.")
+            st.download_button("📥 TÉLÉCHARGER LE FICHIER EXCEL", buffer.getvalue(), "Matrice_OptiStaff_Parfaite.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.error("❌ Les contraintes sont mathématiquement impossibles à résoudre.")
+            st.error("❌ Les contraintes sont mathématiquement impossibles. Réduire l'écart M/A à 1 rend la résolution très complexe. Assurez-vous d'avoir l'effectif exact requis.")
