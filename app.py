@@ -49,6 +49,7 @@ with st.sidebar:
         <li>Coupés Semaine : 1 par titulaire</li>
         <li>Coupés WE : 1 par titulaire (limite à 16)</li>
         <li>Écart toléré Matin / Après-midi : Max 1</li>
+        <li>Effectif Semaine : 8 à 9 Matins, 4 à 5 Après-midis</li>
         <li>Matrice de roulement cyclique</li>
         <li>Max 4 jours consécutifs travaillés</li>
     </ul>
@@ -56,7 +57,7 @@ with st.sidebar:
 
 # --- 3. ESPACE CENTRAL ---
 st.title("Génération de la Matrice de Roulement")
-st.info("Information : L'algorithme répartit les postes en respectant les quotités de contrat, un maximum de 4 jours consécutifs, ainsi qu'une limite d'écart de 1 poste entre les Matins et Après-midis au sein d'un même groupe contractuel.")
+st.info("Information : L'algorithme répartit les postes selon les quotités de contrat, respecte un maximum de 4 jours consécutifs, limite l'écart à 1 poste entre les Matins et Après-midis par contrat, et régule le nombre d'agents par jour en semaine.")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Format Matrice", f"{nb_semaines} Semaines")
@@ -175,16 +176,20 @@ if st.button("Générer la Matrice", use_container_width=True):
         for d in range(jours_cycle):
             is_we = (d % 7 >= 5)
             c_daily = sum(x[(e, d, 'C')] for e in range(total_effectif))
+            m_daily = sum(x[(e, d, 'M')] for e in range(total_effectif))
+            a_daily = sum(x[(e, d, 'A')] for e in range(total_effectif))
             
             if is_we:
-                model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) >= 6)
-                model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) == 3)
+                model.Add(m_daily >= 6)
+                model.Add(a_daily == 3)
                 model.Add(c_daily == 2) 
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires) for p in postes) == 9)
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for p in postes) == 2)
             else:
-                model.Add(sum(x[(e, d, 'M')] for e in range(total_effectif)) >= 8)
-                model.Add(sum(x[(e, d, 'A')] for e in range(total_effectif)) >= 4)
+                model.Add(m_daily >= 8)
+                model.Add(m_daily <= 9)
+                model.Add(a_daily >= 4)
+                model.Add(a_daily <= 5)
                 model.Add(c_daily <= 1) 
 
         # --- OPTIMISATION ---
@@ -272,7 +277,6 @@ if st.button("Générer la Matrice", use_container_width=True):
                     ws.write(5, c+1, jours_lettres[c%7], f_jour)
                 ws.write(5, jours_cycle+1, "RÉSUMÉ DU CYCLE", f_jour)
                 
-                # Remplissage des lignes par salarié
                 for r in range(len(noms_utilises)):
                     is_remp = "VACATAIRE" in noms_utilises[r]
                     for c in range(jours_cycle):
@@ -285,7 +289,6 @@ if st.button("Générer la Matrice", use_container_width=True):
                         ws.write(r+6, c+1, val, fmt)
                     ws.write(r+6, jours_cycle+1, audit_data[r], f_audit)
 
-                # --- AJOUT DES TOTAUX DE COUVERTURE EN BAS DE TABLEAU ---
                 start_totals = len(noms_utilises) + 6 + 1
                 
                 m_totals = [sum(1 for r in resultats if r[c] == 'M') for c in range(jours_cycle)]
