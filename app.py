@@ -50,6 +50,7 @@ with st.sidebar:
         <li>Coupés WE : 1 par titulaire (limite à 16)</li>
         <li>Écart toléré Matin / Après-midi : Max 1</li>
         <li>Effectif Semaine : 8 à 9 Matins, 4 à 5 Après-midis</li>
+        <li>Semaine sans coupé : Fixé à 9 Matins et 5 Après-midis</li>
         <li>Matrice de roulement cyclique</li>
         <li>Max 4 jours consécutifs travaillés</li>
     </ul>
@@ -186,11 +187,22 @@ if st.button("Générer la Matrice", use_container_width=True):
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires) for p in postes) == 9)
                 model.Add(sum(x[(e, d, p)] for e in range(nb_titulaires, total_effectif) for p in postes) == 2)
             else:
-                model.Add(m_daily >= 8)
-                model.Add(m_daily <= 9)
-                model.Add(a_daily >= 4)
-                model.Add(a_daily <= 5)
-                model.Add(c_daily <= 1) 
+                model.Add(c_daily <= 1)
+                
+                # Conditionnement des postes selon la présence ou non de coupés
+                no_coupe = model.NewBoolVar(f'no_coupe_{d}')
+                model.Add(c_daily == 0).OnlyEnforceIf(no_coupe)
+                model.Add(c_daily == 1).OnlyEnforceIf(no_coupe.Not())
+                
+                # Jours sans coupé : Forcé à 9 M et 5 A
+                model.Add(m_daily == 9).OnlyEnforceIf(no_coupe)
+                model.Add(a_daily == 5).OnlyEnforceIf(no_coupe)
+                
+                # Jours avec coupé : Marge classique de 8 à 9 M, 4 à 5 A
+                model.Add(m_daily >= 8).OnlyEnforceIf(no_coupe.Not())
+                model.Add(m_daily <= 9).OnlyEnforceIf(no_coupe.Not())
+                model.Add(a_daily >= 4).OnlyEnforceIf(no_coupe.Not())
+                model.Add(a_daily <= 5).OnlyEnforceIf(no_coupe.Not())
 
         # --- OPTIMISATION ---
         poids_titulaire = sum(x[(e, d, p)] for e in range(nb_titulaires) for d in range(jours_cycle) for p in postes)
